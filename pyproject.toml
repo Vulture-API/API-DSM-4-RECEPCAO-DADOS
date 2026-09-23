@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "station-ingest"
+version = "0.1.0"
+description = "High-throughput MQTT to Redis Streams ingestion service"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiomqtt>=2.5,<3",
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.7,<3",
+    "redis[hiredis]>=5.2,<7",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=0.25,<2",
+]
+
+[project.scripts]
+station-ingest = "station_ingest.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/station_ingest"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "integration: requires externally provided MQTT and Redis services",
+]
+
