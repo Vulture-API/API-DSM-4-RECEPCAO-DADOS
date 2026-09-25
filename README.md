@@ -56,11 +56,29 @@ execute duas instâncias com o mesmo `INGEST_MQTT_CLIENT_ID`: o broker derrubar�
 uma delas. Para escalar horizontalmente, particione tópicos e atribua um client
 ID exclusivo por partição.
 
+## Gravação no PostgreSQL (`persist`)
+
+O mesmo pacote tem um segundo processo, que lê o Redis Stream e grava as leituras no PostgreSQL:
+
+```bash
+python -m station_ingest persist      # a recepção continua sendo: python -m station_ingest
+```
+
+- Consome `telemetry:ingest` com consumer group (`INGEST_PERSIST_GROUP`). O `XACK` só acontece depois do `COMMIT`. Se o processo cair no meio, o lote é regravado ao reiniciar (entrega "pelo menos uma vez").
+- `estacao_id` é o MAC da estação (`stations.mac_address`). O MAC é aceito com `:`, com `-` ou sem separador. Um valor só com dígitos é tratado como `stations.id`.
+- Cada outra chave numérica do payload é o `local_identifier` de um sensor da estação e vira uma linha em `readings`.
+- Chaves sem sensor e estações desconhecidas são ignoradas e contadas no log `readings_persisted`.
+- Atualiza `stations.last_communication_at`, que alimenta o status Online/Offline, e o motor de regras do serviço de alertas passa a enxergar as leituras.
+- Sem `unix_time`, a leitura usa o instante de recepção.
+
+Variáveis: `INGEST_DATABASE_URL` (obrigatória), `INGEST_PERSIST_GROUP`, `INGEST_PERSIST_CONSUMER`, `INGEST_PERSIST_BATCH_SIZE` e `INGEST_PERSIST_BLOCK_MS`.
+
 ## Docker
 
 ```bash
 docker build -t station-ingest:latest .
-docker run --rm --env-file .env station-ingest:latest
+docker run --rm --env-file .env station-ingest:latest            # recepção
+docker run --rm --env-file .env station-ingest:latest persist    # gravação no Postgres
 ```
 
 A imagem contém apenas o serviço. Broker MQTT e Redis são externos.
