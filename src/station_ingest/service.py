@@ -158,3 +158,66 @@ async def run_service(settings: Settings) -> None:
 
     if failure:
         raise failure
+
+
+async def run_persister(settings: Settings) -> None:
+    """Lê o Redis Stream e grava as leituras no PostgreSQL."""
+    import asyncpg
+
+    from station_ingest.persistence import PgReadingStore, StreamPersister
+
+    if not settings.database_url:
+        raise RuntimeError("INGEST_DATABASE_URL é obrigatório para o persist")
+
+    logger = logging.getLogger("station_ingest.persist")
+    stop_event = asyncio.Event()
+    install_signal_handlers(stop_event)
+
+    redis = Redis.from_url(
+        settings.redis_url,
+        socket_timeout=settings.redis_socket_timeout_seconds
+        + settings.persist_block_ms / 1000,
+        socket_connect_timeout=settings.redis_socket_timeout_seconds,
+        health_check_interval=30,
+        decode_responses=True,
+    )
+    pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=4)
+    persister = StreamPersister(
+        redis,
+        PgReadingStore(pool),
+        stream=settings.redis_stream,
+        group=settings.persist_group,
+        consumer=settings.persist_consumer,
+        batch_size=settings.persist_batch_size,
+        block_ms=settings.persist_block_ms,
+        retry_initial_seconds=settings.retry_initial_seconds,
+        retry_max_seconds=settings.retry_max_seconds,
+        logger=logger,
+    )
+    log_event(
+        logger,
+        "persister_started",
+        redis_stream=settings.redis_stream,
+        group=settings.persist_group,
+        consumer=settings.persist_consumer,
+    )
+    task = asyncio.create_task(persister.run(stop_event))
+    stop_waiter = asyncio.create_task(stop_event.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {task, stop_waiter}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if task in done:
+            task.result()
+    finally:
+        stop_event.set()
+        task.cancel()
+        stop_waiter.cancel()
+        await asyncio.gather(task, stop_waiter, return_exceptions=True)
+        await pool.close()
+        await redis.aclose()
+        log_event(
+            logger,
+            "persister_stopped",
+            readings_written=persister.readings_written,
+        )

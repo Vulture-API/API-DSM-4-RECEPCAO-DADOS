@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     retry_max_seconds: float = Field(default=30.0, gt=0)
     shutdown_timeout_seconds: float = Field(default=30.0, gt=0)
 
+    # Consumidor Redis -> PostgreSQL (python -m station_ingest persist)
+    database_url: str | None = None
+    persist_group: str = "postgres-persister"
+    persist_consumer: str = "persister-01"
+    persist_batch_size: int = Field(default=500, ge=1)
+    persist_block_ms: int = Field(default=1000, ge=1)
+
     log_level: str = "INFO"
     metrics_interval_seconds: float = Field(default=30.0, gt=0)
 
