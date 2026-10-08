@@ -20,6 +20,10 @@ dependencies = [
 test = [
     "pytest>=8.3,<9",
     "pytest-asyncio>=0.25,<2",
+    "pytest-cov>=6,<8",
+]
+lint = [
+    "ruff>=0.8,<1",
 ]
 
 [project.scripts]
@@ -36,3 +40,20 @@ markers = [
     "integration: requires externally provided MQTT and Redis services",
 ]
 
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+# Linhas longas ficam a cargo do formatter (SQL e mensagens não são quebrados).
+ignore = ["E501"]
+
+[tool.coverage.run]
+source = ["station_ingest"]
+branch = false
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

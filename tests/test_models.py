@@ -24,9 +24,7 @@ def test_station_event_preserves_dynamic_fields() -> None:
 
 @pytest.mark.parametrize("value", [None, "1700000000", -1, True, 2.5, {}])
 def test_invalid_timestamp_becomes_null(value: object) -> None:
-    event = StationEvent.model_validate(
-        {"estacao_id": "station-1", "unix_time": value}
-    )
+    event = StationEvent.model_validate({"estacao_id": "station-1", "unix_time": value})
     assert event.unix_time is None
 
 
@@ -52,4 +50,3 @@ def test_stream_fields_contain_normalized_payload() -> None:
         "unix_time": None,
         "humidity": 40,
     }
-

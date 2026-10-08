@@ -31,4 +31,3 @@ def test_batch_cannot_exceed_queue() -> None:
 def test_tls_cert_and_key_are_a_pair() -> None:
     with pytest.raises(ValidationError, match="must be set together"):
         Settings(_env_file=None, mqtt_tls_cert_file="client.crt")
-
