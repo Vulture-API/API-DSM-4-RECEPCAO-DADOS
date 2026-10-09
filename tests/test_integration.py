@@ -14,7 +14,6 @@ from station_ingest.models import BufferedEvent
 from station_ingest.mqtt_consumer import MqttConsumer
 from station_ingest.redis_writer import RedisStreamWriter
 
-
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
@@ -72,9 +71,7 @@ async def test_real_mqtt_to_redis_round_trip() -> None:
         ) as publisher:
             await publisher.publish(
                 f"integration/{suffix}/data",
-                payload=json.dumps(
-                    {"estacao_id": "integration-1", "unix_time": 1}
-                ),
+                payload=json.dumps({"estacao_id": "integration-1", "unix_time": 1}),
                 qos=1,
             )
 
@@ -92,4 +89,3 @@ async def test_real_mqtt_to_redis_round_trip() -> None:
         await asyncio.gather(writer_task, consumer_task, return_exceptions=True)
         await redis.delete(settings.redis_stream)
         await redis.aclose()
-

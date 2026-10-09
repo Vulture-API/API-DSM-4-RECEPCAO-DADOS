@@ -70,4 +70,3 @@ async def run(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     asyncio.run(run(parse_args()))
-

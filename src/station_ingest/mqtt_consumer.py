@@ -19,11 +19,7 @@ def create_tls_context(settings: Settings) -> ssl.SSLContext | None:
     if not settings.mqtt_tls:
         return None
     context = ssl.create_default_context(
-        cafile=(
-            str(settings.mqtt_tls_ca_file)
-            if settings.mqtt_tls_ca_file
-            else None
-        )
+        cafile=(str(settings.mqtt_tls_ca_file) if settings.mqtt_tls_ca_file else None)
     )
     if settings.mqtt_tls_cert_file and settings.mqtt_tls_key_file:
         context.load_cert_chain(
@@ -107,9 +103,7 @@ class MqttConsumer:
                     pass
                 delay = min(delay * 2, self.settings.retry_max_seconds)
 
-    async def _consume_connection(
-        self, client: Any, stop_event: asyncio.Event
-    ) -> None:
+    async def _consume_connection(self, client: Any, stop_event: asyncio.Event) -> None:
         async def consume() -> None:
             async for message in client.messages:
                 self.metrics.received += 1

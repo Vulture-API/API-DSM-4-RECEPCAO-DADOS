@@ -3,8 +3,8 @@ import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
-import pytest
 import aiomqtt
+import pytest
 
 from station_ingest.config import Settings
 from station_ingest.metrics import Metrics

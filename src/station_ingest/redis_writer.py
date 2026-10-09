@@ -64,9 +64,7 @@ class RedisStreamWriter:
                 self.queue.task_done()
             self.metrics.persisted += len(batch)
 
-    async def _collect_batch(
-        self, stop_event: asyncio.Event
-    ) -> list[BufferedEvent]:
+    async def _collect_batch(self, stop_event: asyncio.Event) -> list[BufferedEvent]:
         if stop_event.is_set() and self.queue.empty():
             return []
 
@@ -99,9 +97,7 @@ class RedisStreamWriter:
                 break
         return batch
 
-    async def _persist_with_retry(
-        self, batch: Sequence[BufferedEvent]
-    ) -> None:
+    async def _persist_with_retry(self, batch: Sequence[BufferedEvent]) -> None:
         delay = self.retry_initial_seconds
         while True:
             try:
@@ -151,9 +147,7 @@ async def run_retention(
 ) -> None:
     while not stop_event.is_set():
         try:
-            removed = await enforce_retention_once(
-                redis, stream, retention_seconds
-            )
+            removed = await enforce_retention_once(redis, stream, retention_seconds)
             if removed:
                 log_event(logger, "redis_stream_trimmed", removed=removed)
         except asyncio.CancelledError:
@@ -170,4 +164,3 @@ async def run_retention(
             await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
         except TimeoutError:
             pass
-

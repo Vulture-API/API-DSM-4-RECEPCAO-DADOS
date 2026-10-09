@@ -34,4 +34,3 @@ def test_invalid_payload_is_rejected(payload: bytes, reason: str) -> None:
 def test_payload_size_is_checked_before_json_decode() -> None:
     result = parse_message(b'{"estacao_id":"e-1"}', "topic", 3)
     assert result == ParseFailure("payload_too_large")
-
