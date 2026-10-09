@@ -1,9 +1,13 @@
 import asyncio
+import itertools
 import json
 import logging
+import sys
+import types
 
 import pytest
 
+from station_ingest import metrics as metrics_module
 from station_ingest.logging_config import JsonFormatter, configure_logging, log_event
 from station_ingest.metrics import Metrics, report_metrics
 
@@ -38,8 +42,6 @@ def test_json_formatter_includes_exception() -> None:
     try:
         raise ValueError("boom")
     except ValueError:
-        import sys
-
         record = logger.makeRecord(
             logger.name, logging.ERROR, __file__, 1, "failed", None, sys.exc_info()
         )
@@ -72,10 +74,31 @@ def test_metrics_counts_discards_by_reason() -> None:
     assert metrics.discarded == {"invalid_json": 2, "too_large": 1}
 
 
+class EventHandler(logging.Handler):
+    """Avisa quando chega o primeiro registro com o evento esperado."""
+
+    def __init__(self, event: str) -> None:
+        super().__init__()
+        self.event = event
+        self.records: list[logging.LogRecord] = []
+        self.seen = asyncio.Event()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.getMessage() == self.event:
+            self.records.append(record)
+            self.seen.set()
+
+
 @pytest.mark.asyncio
-async def test_report_metrics_logs_periodically_until_stopped() -> None:
+async def test_report_metrics_logs_periodically_until_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ticks = itertools.count(100.0, 2.0)
+    monkeypatch.setattr(
+        metrics_module, "time", types.SimpleNamespace(monotonic=lambda: next(ticks))
+    )
     logger = logging.getLogger("test.metrics")
-    handler = CaptureHandler()
+    handler = EventHandler("ingest_metrics")
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
     metrics = Metrics()
@@ -86,19 +109,28 @@ async def test_report_metrics_logs_periodically_until_stopped() -> None:
     await queue.put(object())
     stop_event = asyncio.Event()
 
-    task = asyncio.create_task(report_metrics(metrics, queue, stop_event, 0.01, logger))
-    await asyncio.sleep(0.05)
-    stop_event.set()
-    await asyncio.wait_for(task, timeout=1)
-    logger.removeHandler(handler)
+    try:
+        task = asyncio.create_task(
+            report_metrics(metrics, queue, stop_event, 0.01, logger)
+        )
+        await asyncio.wait_for(handler.seen.wait(), timeout=2)
+        handler.seen.clear()
+        metrics.persisted += 10
+        await asyncio.wait_for(handler.seen.wait(), timeout=2)
+        stop_event.set()
+        await asyncio.wait_for(task, timeout=2)
+    finally:
+        logger.removeHandler(handler)
 
-    events = [r for r in handler.records if r.getMessage() == "ingest_metrics"]
-    assert events
-    fields = events[0].structured_fields
+    fields = handler.records[0].structured_fields
     assert fields["received"] == 5
+    assert fields["persisted"] == 3
     assert fields["discarded"] == 1
     assert fields["discarded_by_reason"] == {"invalid_json": 1}
     assert fields["queue_depth"] == 1
+    assert fields["persisted_per_second"] == 0.0
+    # 10 persistidas entre os dois relatórios, com 2 s de intervalo no relógio.
+    assert handler.records[1].structured_fields["persisted_per_second"] == 5.0
 
 
 def test_log_event_passes_level_and_fields() -> None:
