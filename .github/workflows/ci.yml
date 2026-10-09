@@ -79,13 +79,16 @@ jobs:
       # precisa do arquivo sem autenticação que já vem na imagem.
       - name: Subir broker MQTT
         run: |
-          docker run -d --name mosquitto -p 1883:1883 eclipse-mosquitto:2 \
-            mosquitto -c /mosquitto-no-auth.conf
-          for i in $(seq 1 20); do
-            nc -z localhost 1883 && exit 0
-            sleep 1
+          docker run -d --name mosquitto -p 1883:1883 \
+            --health-cmd "mosquitto_pub -h localhost -t ci/health -m ok" \
+            --health-interval 2s --health-timeout 5s --health-retries 15 \
+            eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf
+          for i in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' mosquitto)" = healthy ] && exit 0
+            sleep 2
           done
-          echo "::error::Broker MQTT não respondeu na porta 1883."
+          docker logs mosquitto
+          echo "::error::Broker MQTT não ficou pronto."
           exit 1
 
       - name: Instalar dependências (clean room)
@@ -102,8 +105,24 @@ jobs:
 
       - name: Testes com cobertura
         run: |
-          pytest --cov --cov-report=term --cov-report=json \
+          pytest -rs --cov --cov-report=term --cov-report=json \
             --cov-report=xml --junitxml=reports/junit.xml
+
+      # Os testes de integração viram "skipped" se faltar um serviço ou uma
+      # variável; no CI isso tem que falhar, não passar em silêncio.
+      - name: Nenhum teste pulado
+        run: |
+          python - <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse("reports/junit.xml").getroot()
+          suites = [root] if root.tag == "testsuite" else list(root)
+          skipped = sum(int(s.get("skipped", 0)) for s in suites)
+          if skipped:
+              print(f"::error::{skipped} teste(s) pulado(s). Confira os serviços e as variáveis TEST_* do job.")
+              sys.exit(1)
+          PY
 
       - name: Quality Gate de cobertura (DoD 80%)
         id: coverage_gate
@@ -135,7 +154,7 @@ jobs:
             coverage.xml
             coverage.json
           retention-days: 7
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
   docker:
     name: Validar build da imagem Docker
@@ -157,7 +176,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [quality, docker]
     if: >-
-      always() && github.event_name == 'pull_request' &&
+      !cancelled() && github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 5
     permissions:
@@ -182,11 +201,11 @@ jobs:
               `- Lint, testes e build: \`${process.env.QUALITY}\``,
               `- Imagem Docker: \`${process.env.DOCKER}\``,
               `- Cobertura de linhas: **${coverage}%** (mínimo ${process.env.COVERAGE_THRESHOLD}%)`,
-              `- Commit: \`${context.sha.substring(0, 7)}\``,
+              `- Commit: \`${context.payload.pull_request.head.sha.substring(0, 7)}\``,
               `- [Ver execução completa](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
             ].join('\n');
 
-            const { data: comments } = await github.rest.issues.listComments({
+            const comments = await github.paginate(github.rest.issues.listComments, {
               ...context.repo,
               issue_number: context.issue.number,
               per_page: 100,
