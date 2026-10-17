@@ -39,9 +39,7 @@ class FakeRedis:
     async def time(self) -> tuple[int, int]:
         return (1_700_000_000, 500_000)
 
-    async def xtrim(
-        self, name: str, *, minid: str, approximate: bool
-    ) -> int:
+    async def xtrim(self, name: str, *, minid: str, approximate: bool) -> int:
         self.trim_call = (name, minid, approximate)
         return 3
 
@@ -135,3 +133,99 @@ async def test_retention_uses_redis_clock() -> None:
 
     assert removed == 3
     assert redis.trim_call == ("stream", "1699999940500-0", True)
+
+
+@pytest.mark.asyncio
+async def test_ack_follows_successful_xadd_and_retry():
+    from dataclasses import replace
+
+    redis = FakeRedis(failures=1)
+    queue = asyncio.Queue()
+    attempts_at_ack = []
+    event = replace(
+        buffered("a"),
+        confirm=lambda: attempts_at_ack.append(redis.execute_attempts) or True,
+    )
+    queue.put_nowait(event)
+    metrics = Metrics()
+    writer = RedisStreamWriter(
+        redis,
+        "stream",
+        queue,
+        metrics,
+        batch_size=1,
+        flush_interval_seconds=0.001,
+        retry_initial_seconds=0.001,
+        retry_max_seconds=0.002,
+        logger=__import__("logging").getLogger("test"),
+    )
+    stop = asyncio.Event()
+    stop.set()
+    await writer.run(stop)
+    assert attempts_at_ack == [2]
+    assert metrics.mqtt_acked == 1
+    assert metrics.latency_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_write_does_not_ack():
+    from dataclasses import replace
+
+    redis = FakeRedis(failures=1000)
+    queue = asyncio.Queue()
+    acks = []
+    queue.put_nowait(replace(buffered("a"), confirm=lambda: acks.append(True) or True))
+    writer = RedisStreamWriter(
+        redis,
+        "stream",
+        queue,
+        Metrics(),
+        batch_size=1,
+        flush_interval_seconds=0.001,
+        retry_initial_seconds=10,
+        retry_max_seconds=10,
+        logger=__import__("logging").getLogger("test"),
+    )
+    task = asyncio.create_task(writer.run(asyncio.Event()))
+    async with asyncio.timeout(1):
+        while redis.execute_attempts == 0:
+            await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert acks == []
+
+
+@pytest.mark.asyncio
+async def test_incomplete_pipeline_result_is_retried_before_ack():
+    from dataclasses import replace
+    from unittest.mock import AsyncMock, Mock
+
+    redis, pipeline = Mock(), Mock()
+    redis.pipeline.return_value = pipeline
+    # The first call may have written a prefix of the batch. Retrying can
+    # duplicate entries, but none of the MQTT receipts may be confirmed yet.
+    pipeline.execute = AsyncMock(side_effect=[["1-0"], ["2-0", "3-0"]])
+    queue, stop, metrics, acks = asyncio.Queue(), asyncio.Event(), Metrics(), []
+    for station in ("a", "b"):
+        queue.put_nowait(
+            replace(
+                buffered(station),
+                confirm=lambda: acks.append(pipeline.execute.await_count) or True,
+            )
+        )
+    writer = RedisStreamWriter(
+        redis,
+        "stream",
+        queue,
+        metrics,
+        batch_size=2,
+        flush_interval_seconds=0.001,
+        retry_initial_seconds=0.001,
+        retry_max_seconds=0.002,
+        logger=__import__("logging").getLogger("test"),
+    )
+    stop.set()
+    await writer.run(stop)
+    assert acks == [2, 2]
+    assert metrics.redis_retries == 1
+    assert metrics.persisted == 2

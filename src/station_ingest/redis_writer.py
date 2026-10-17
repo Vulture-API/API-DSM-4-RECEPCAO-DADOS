@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Sequence
 from typing import Any, Protocol
 
@@ -60,13 +61,18 @@ class RedisStreamWriter:
             if not batch:
                 continue
             await self._persist_with_retry(batch)
-            for _ in batch:
+            now_ms = time.time_ns() // 1_000_000
+            for event in batch:
+                self.metrics.record_latency(max(0, now_ms - event.received_at_ms))
+                if event.confirm is not None:
+                    if event.confirm():
+                        self.metrics.mqtt_acked += 1
+                    else:
+                        self.metrics.mqtt_unconfirmed += 1
                 self.queue.task_done()
             self.metrics.persisted += len(batch)
 
-    async def _collect_batch(
-        self, stop_event: asyncio.Event
-    ) -> list[BufferedEvent]:
+    async def _collect_batch(self, stop_event: asyncio.Event) -> list[BufferedEvent]:
         if stop_event.is_set() and self.queue.empty():
             return []
 
@@ -99,16 +105,19 @@ class RedisStreamWriter:
                 break
         return batch
 
-    async def _persist_with_retry(
-        self, batch: Sequence[BufferedEvent]
-    ) -> None:
+    async def _persist_with_retry(self, batch: Sequence[BufferedEvent]) -> None:
         delay = self.retry_initial_seconds
         while True:
             try:
                 pipeline = self.redis.pipeline(transaction=False)
                 for event in batch:
                     pipeline.xadd(self.stream, event.to_stream_fields())
-                await pipeline.execute()
+                results = await pipeline.execute()
+                if len(results) != len(batch) or any(
+                    not isinstance(result, str | bytes) or not result
+                    for result in results
+                ):
+                    raise RuntimeError("Redis returned an incomplete XADD result")
                 return
             except asyncio.CancelledError:
                 raise
@@ -151,9 +160,7 @@ async def run_retention(
 ) -> None:
     while not stop_event.is_set():
         try:
-            removed = await enforce_retention_once(
-                redis, stream, retention_seconds
-            )
+            removed = await enforce_retention_once(redis, stream, retention_seconds)
             if removed:
                 log_event(logger, "redis_stream_trimmed", removed=removed)
         except asyncio.CancelledError:
@@ -170,4 +177,3 @@ async def run_retention(
             await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
         except TimeoutError:
             pass
-
