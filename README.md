@@ -125,6 +125,18 @@ A imagem executa `python -m station_ingest` como usuário `ingest`:
 docker run --rm --env-file .env station-ingest:local
 ```
 
+## CI e análise de segurança
+
+O workflow `.github/workflows/ci.yml` mantém os checks obrigatórios
+**Lint, testes e build** e **Validar build da imagem Docker**. Executa lint e
+formatação com Ruff fixado, testes unitários e integrações descartáveis, nenhum
+skip permitido, cobertura mínima de 80%, pacote e imagem sem root. Os relatórios
+ficam nos artefatos da execução; o resultado é registrado no PR pelo workflow.
+Os testes de redelivery e a suíte do persistidor legado também são obrigatórios.
+
+O workflow `.github/workflows/codeql.yml` preserva a análise Python de qualidade
+e segurança adicionada na SCRUM-377, em PRs, dev/main e na agenda configurada.
+
 ## Medição de taxa
 
 O publicador de teste requer o extra `test` (aiomqtt apenas para produzir mensagens):

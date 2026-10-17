@@ -1,97 +1,232 @@
+# ---------------------------------------------------------------------------
+# SCRUM-377 — Pipeline de Integração Contínua da recepção de dados (Python)
+#
+# Etapas: instalação limpa -> lint (ruff) -> formatação -> testes unitários e
+# de integração (MQTT, Redis e PostgreSQL descartáveis) -> Quality Gate 80%
+# -> build da imagem Docker (sem push).
+# ---------------------------------------------------------------------------
 name: CI
+
 on:
-  push:
-    branches: [dev, main, 'SCRUM-*']
   pull_request:
     branches: [dev, main]
+  push:
+    branches: [dev, main, 'SCRUM-*']
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  COVERAGE_THRESHOLD: "80"
+
 jobs:
-  verify:
+  quality:
     name: Lint, testes e build
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      coverage: ${{ steps.coverage_gate.outputs.coverage }}
+
     services:
-      redis:
-        image: redis:7-alpine
-        ports: ['6379:6379']
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 2s
-          --health-timeout 2s
-          --health-retries 30
       postgres:
         image: postgres:16-alpine
         env:
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: telemetry_test
-        ports: ['5432:5432']
+        ports:
+          - 5432:5432
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 2s
-          --health-timeout 2s
-          --health-retries 30
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     env:
-      RUN_INTEGRATION: '1'
-      TEST_REDIS_URL: redis://127.0.0.1:6379/15
-      TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/telemetry_test
-      TEST_MQTT_HOST: 127.0.0.1
-      TEST_MQTT_PORT: '1883'
+      RUN_INTEGRATION: "1"
+      TEST_MQTT_HOST: localhost
+      TEST_MQTT_PORT: "1883"
+      TEST_REDIS_URL: redis://localhost:6379/15
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
         with:
-          python-version: '3.12'
-      - name: Install
-        run: python -m pip install -e '.[test,lint]' build
-      - name: Lint and formatting
+          persist-credentials: false
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # Service containers não aceitam argumentos de comando; o Mosquitto 2
+      # precisa do arquivo sem autenticação que já vem na imagem.
+      - name: Subir broker MQTT
         run: |
-          ruff check .
-          ruff format --check .
-      - name: Start disposable MQTT broker
-        run: |
-          docker run -d --name telemetry-mqtt -p 127.0.0.1:1883:1883 eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf
-          for attempt in $(seq 1 30); do
-            if docker exec telemetry-mqtt mosquitto_pub -h localhost -t ci/ready -m ready -q 1; then exit 0; fi
-            sleep 1
+          docker run -d --name mosquitto -p 1883:1883 \
+            --health-cmd "mosquitto_pub -h localhost -t ci/health -m ok" \
+            --health-interval 2s --health-timeout 5s --health-retries 15 \
+            eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf
+          for i in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' mosquitto)" = healthy ] && exit 0
+            sleep 2
           done
+          docker logs mosquitto
+          echo "::error::Broker MQTT não ficou pronto."
           exit 1
-      - name: Tests and coverage
-        run: pytest --cov --cov-report=term-missing --cov-report=xml --junitxml=reports/junit.xml
-      - name: Require integration execution without skips
+
+      - name: Instalar dependências (clean room)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test,lint]"
+          pip check
+
+      - name: Lint
+        run: ruff check --output-format=github .
+
+      - name: Checagem de formatação
+        run: ruff format --check .
+
+      - name: Testes com cobertura
+        run: |
+          pytest -rs --cov --cov-report=term --cov-report=json \
+            --cov-report=xml --junitxml=reports/junit.xml
+
+      # Os testes de integração viram "skipped" se faltar um serviço ou uma
+      # variável; no CI isso tem que falhar, não passar em silêncio.
+      - name: Nenhum teste pulado
         run: |
           python - <<'PY'
+          import sys
           import xml.etree.ElementTree as ET
-          root = ET.parse('reports/junit.xml').getroot()
-          cases = list(root.iter('testcase'))
-          assert cases and not list(root.iter('skipped')), 'Required tests were skipped'
-          assert any('test_pg_store_writes_readings_and_last_communication' in case.attrib['name'] for case in cases)
-          assert any('test_real_mqtt_to_redis_round_trip' in case.attrib['name'] for case in cases)
-          assert sum('test_killed_receiver_redelivers_unacked_message' in case.attrib['name'] for case in cases) == 2
+
+          root = ET.parse("reports/junit.xml").getroot()
+          suites = [root] if root.tag == "testsuite" else list(root)
+          skipped = sum(int(s.get("skipped", 0)) for s in suites)
+          if skipped:
+              print(f"::error::{skipped} teste(s) pulado(s). Confira os serviços e as variáveis TEST_* do job.")
+              sys.exit(1)
+          cases = list(root.iter("testcase"))
+          assert cases, "No tests were reported"
+          assert any("test_pg_store_writes_readings_and_last_communication" in c.attrib["name"] for c in cases)
+          assert any("test_real_mqtt_to_redis_round_trip" in c.attrib["name"] for c in cases)
+          assert sum("test_killed_receiver_redelivers_unacked_message" in c.attrib["name"] for c in cases) == 2
           PY
-      - name: Package
-        run: python -m build
-      - uses: actions/upload-artifact@v4
+
+      - name: Quality Gate de cobertura (DoD 80%)
+        id: coverage_gate
+        run: |
+          COVERAGE=$(python -c "import json; print(int(json.load(open('coverage.json'))['totals']['percent_covered']))")
+          echo "Cobertura de linhas: ${COVERAGE}%"
+          echo "coverage=${COVERAGE}" >> "$GITHUB_OUTPUT"
+          echo "### Cobertura: ${COVERAGE}% (mínimo ${COVERAGE_THRESHOLD}%)" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$COVERAGE" -lt "$COVERAGE_THRESHOLD" ]; then
+            echo "::error::FALHA: cobertura de ${COVERAGE}% não atinge a DoD (${COVERAGE_THRESHOLD}%). Merge bloqueado."
+            exit 1
+          fi
+
+          echo "::notice::Quality Gate aprovado: ${COVERAGE}% de cobertura."
+
+      - name: Build do pacote
+        run: |
+          pip install build
+          python -m build --wheel --outdir dist/
+
+      - name: Publicar relatórios
         if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: verification
+          name: ci-reports
           path: |
-            coverage.xml
             reports/
+            coverage.xml
+            coverage.json
             dist/
-      - name: Stop disposable broker
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Encerrar broker descartável
         if: always()
-        run: docker rm -f telemetry-mqtt || true
+        run: docker rm -f mosquitto || true
 
   docker:
     name: Validar build da imagem Docker
     runs-on: ubuntu-latest
-    needs: verify
+    needs: quality
     timeout-minutes: 15
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Docker build and non-root check
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build da imagem (sem push)
         run: |
-          docker build -t station-ingest:ci .
-          test "$(docker run --rm --entrypoint id station-ingest:ci -u)" != 0
+          image_tag="api-dsm-4-recepcao-dados:ci-${{ github.sha }}"
+          docker build -t "$image_tag" .
+          test "$(docker run --rm --entrypoint id "$image_tag" -u)" != 0
+
+  comment:
+    name: Comentar resultado no PR
+    runs-on: ubuntu-latest
+    needs: [quality, docker]
+    if: >-
+      !cancelled() && github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Criar ou atualizar o comentário do CI
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          QUALITY: ${{ needs.quality.result }}
+          DOCKER: ${{ needs.docker.result }}
+          COVERAGE: ${{ needs.quality.outputs.coverage }}
+        with:
+          script: |
+            const marker = '<!-- vulture-ci-report -->';
+            const ok = process.env.QUALITY === 'success' && process.env.DOCKER === 'success';
+            const coverage = process.env.COVERAGE || 'n/d';
+            const body = [
+              marker,
+              `${ok ? '✅' : '❌'} **Pipeline de CI: ${ok ? 'aprovado' : 'reprovado'}**`,
+              '',
+              `- Lint, testes e build: \`${process.env.QUALITY}\``,
+              `- Imagem Docker: \`${process.env.DOCKER}\``,
+              `- Cobertura de linhas: **${coverage}%** (mínimo ${process.env.COVERAGE_THRESHOLD}%)`,
+              `- Commit: \`${context.payload.pull_request.head.sha.substring(0, 7)}\``,
+              `- [Ver execução completa](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+            ].join('\n');
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+            const existing = comments.find((c) => c.body?.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+            }
