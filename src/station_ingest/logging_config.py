@@ -43,4 +43,3 @@ def log_event(
         extra={"structured_fields": fields},
         exc_info=exc_info,
     )
-

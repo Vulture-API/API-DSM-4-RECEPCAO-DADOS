@@ -60,9 +60,7 @@ class Settings(BaseSettings):
         if self.batch_size > self.queue_max_size:
             raise ValueError("batch_size cannot exceed queue_max_size")
         if self.retry_initial_seconds > self.retry_max_seconds:
-            raise ValueError(
-                "retry_initial_seconds cannot exceed retry_max_seconds"
-            )
+            raise ValueError("retry_initial_seconds cannot exceed retry_max_seconds")
         if bool(self.mqtt_tls_cert_file) != bool(self.mqtt_tls_key_file):
             raise ValueError(
                 "mqtt_tls_cert_file and mqtt_tls_key_file must be set together"

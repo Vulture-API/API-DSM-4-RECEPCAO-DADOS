@@ -38,6 +38,7 @@ def parse_message(
     except ValidationError:
         return ParseFailure("invalid_or_missing_station_id")
 
-    timestamp = received_at_ms if received_at_ms is not None else time.time_ns() // 1_000_000
+    timestamp = (
+        received_at_ms if received_at_ms is not None else time.time_ns() // 1_000_000
+    )
     return BufferedEvent(event=event, topic=topic, received_at_ms=timestamp)
-

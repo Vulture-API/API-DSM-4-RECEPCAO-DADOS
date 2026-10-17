@@ -39,9 +39,7 @@ class FakeRedis:
     async def time(self) -> tuple[int, int]:
         return (1_700_000_000, 500_000)
 
-    async def xtrim(
-        self, name: str, *, minid: str, approximate: bool
-    ) -> int:
+    async def xtrim(self, name: str, *, minid: str, approximate: bool) -> int:
         self.trim_call = (name, minid, approximate)
         return 3
 

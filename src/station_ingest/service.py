@@ -32,9 +32,7 @@ async def run_service(settings: Settings) -> None:
     stop_event = asyncio.Event()
     install_signal_handlers(stop_event)
 
-    queue: asyncio.Queue[BufferedEvent] = asyncio.Queue(
-        maxsize=settings.queue_max_size
-    )
+    queue: asyncio.Queue[BufferedEvent] = asyncio.Queue(maxsize=settings.queue_max_size)
     metrics = Metrics()
     redis = Redis.from_url(
         settings.redis_url,

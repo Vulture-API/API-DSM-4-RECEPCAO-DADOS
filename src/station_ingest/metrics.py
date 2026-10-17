@@ -50,4 +50,3 @@ async def report_metrics(
             )
             last_time = now
             last_persisted = metrics.persisted
-

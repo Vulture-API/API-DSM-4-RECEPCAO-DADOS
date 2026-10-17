@@ -120,6 +120,19 @@ pytest -m integration
 
 O teste cria chaves e tópicos com nomes aleatórios e remove o Stream ao final.
 
+## CI
+
+O workflow `.github/workflows/ci.yml` roda em PR e push para `dev` e `main`:
+ruff (lint e formatação), testes unitários e de integração com MQTT, Redis e
+PostgreSQL descartáveis, cobertura mínima de 80% e build da imagem Docker. Para
+reproduzir localmente:
+
+```bash
+pip install -e '.[test,lint]'
+ruff check . && ruff format --check .
+pytest --cov
+```
+
 ## Benchmark
 
 Execute contra o ambiente de staging e acompanhe simultaneamente os logs de

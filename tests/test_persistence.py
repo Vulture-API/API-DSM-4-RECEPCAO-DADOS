@@ -212,12 +212,18 @@ async def test_pg_store_writes_readings_and_last_communication():
                 parse_stream_entry(
                     "1-0",
                     fields(
-                        {"estacao_id": "aa-bb-cc-dd-ee-07", "temp": 30.5,
-                         "umid": 70, "vento": 3},
+                        {
+                            "estacao_id": "aa-bb-cc-dd-ee-07",
+                            "temp": 30.5,
+                            "umid": 70,
+                            "vento": 3,
+                        },
                         "1760000000",
                     ),
                 ),
-                parse_stream_entry("2-0", fields({"estacao_id": "FF:FF:FF:FF:FF:FF", "temp": 1})),
+                parse_stream_entry(
+                    "2-0", fields({"estacao_id": "FF:FF:FF:FF:FF:FF", "temp": 1})
+                ),
             ]
             result = await store.persist(entries)
             assert result.readings == 2
@@ -225,7 +231,9 @@ async def test_pg_store_writes_readings_and_last_communication():
             await store.persist(entries)
             assert await conn.fetchval("SELECT count(*) FROM readings") == 2
             assert result.skipped == {"unknown_sensor": 1, "unknown_station": 1}
-            rows = await conn.fetch("SELECT sensor_id, value FROM readings ORDER BY sensor_id")
+            rows = await conn.fetch(
+                "SELECT sensor_id, value FROM readings ORDER BY sensor_id"
+            )
             assert [(r[0], float(r[1])) for r in rows] == [(70, 30.5), (71, 70.0)]
             last = await conn.fetchval("SELECT last_communication_at FROM stations")
             assert last.isoformat() == "2025-10-09T08:53:20"
@@ -262,7 +270,12 @@ def test_main_rejects_unknown_command():
 def test_parse_never_raises_on_garbage_fields():
     entry = parse_stream_entry(
         "1-0",
-        {"estacao_id": "1", "unix_time": "abc", "received_at": "xyz", "payload": "[1, 2]"},
+        {
+            "estacao_id": "1",
+            "unix_time": "abc",
+            "received_at": "xyz",
+            "payload": "[1, 2]",
+        },
     )
     assert entry.station_key is None
     assert entry.measurements == ()

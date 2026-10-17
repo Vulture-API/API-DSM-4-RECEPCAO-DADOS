@@ -128,10 +128,18 @@ class PgReadingStore:
     async def persist(self, entries: Sequence[StreamEntry]) -> PersistResult:
         result = PersistResult()
         macs = sorted(
-            {e.station_key[1] for e in entries if e.station_key and e.station_key[0] == "mac"}
+            {
+                e.station_key[1]
+                for e in entries
+                if e.station_key and e.station_key[0] == "mac"
+            }
         )
         ids = sorted(
-            {int(e.station_key[1]) for e in entries if e.station_key and e.station_key[0] == "id"}
+            {
+                int(e.station_key[1])
+                for e in entries
+                if e.station_key and e.station_key[0] == "id"
+            }
         )
 
         async with self.pool.acquire() as conn, conn.transaction():
@@ -171,9 +179,7 @@ class PgReadingStore:
                     last_seen.get(station_id, 0), entry.unix_time
                 )
                 for m in entry.measurements:
-                    sensor_id = sensors.get(
-                        (station_id, m.local_identifier.lower())
-                    )
+                    sensor_id = sensors.get((station_id, m.local_identifier.lower()))
                     if sensor_id is None:
                         result.skipped["unknown_sensor"] += 1
                         continue
