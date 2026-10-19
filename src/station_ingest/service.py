@@ -30,6 +30,7 @@ def install_signal_handlers(
 async def run_service(settings: Settings) -> None:
     logger = logging.getLogger("station_ingest")
     stop_event = asyncio.Event()
+    writer_stop = asyncio.Event()
     install_signal_handlers(stop_event)
 
     queue: asyncio.Queue[BufferedEvent] = asyncio.Queue(maxsize=settings.queue_max_size)
@@ -57,17 +58,7 @@ async def run_service(settings: Settings) -> None:
 
     tasks = {
         "mqtt": asyncio.create_task(mqtt.run(stop_event)),
-        "writer": asyncio.create_task(writer.run(stop_event)),
-        "retention": asyncio.create_task(
-            run_retention(
-                redis,
-                settings.redis_stream,
-                settings.retention_days * 24 * 60 * 60,
-                settings.retention_interval_seconds,
-                stop_event,
-                logger,
-            )
-        ),
+        "writer": asyncio.create_task(writer.run(writer_stop)),
         "metrics": asyncio.create_task(
             report_metrics(
                 metrics,
@@ -78,6 +69,20 @@ async def run_service(settings: Settings) -> None:
             )
         ),
     }
+    if settings.retention_enabled:
+        log_event(logger, "unsafe_age_retention_enabled", level=logging.WARNING)
+        tasks["retention"] = asyncio.create_task(
+            run_retention(
+                redis,
+                settings.redis_stream,
+                settings.retention_days * 24 * 60 * 60,
+                settings.retention_interval_seconds,
+                stop_event,
+                logger,
+            )
+        )
+    else:
+        log_event(logger, "retention_disabled", policy_task="SCRUM-530")
     stop_waiter = asyncio.create_task(stop_event.wait())
     failure: BaseException | None = None
 
@@ -109,16 +114,20 @@ async def run_service(settings: Settings) -> None:
                         exc_info=True,
                     )
                 else:
-                    failure = RuntimeError(f"task {name} exited unexpectedly")
+                    if not stop_event.is_set():
+                        failure = RuntimeError(f"task {name} exited unexpectedly")
                 break
         stop_event.set()
+        shutdown_deadline = (
+            asyncio.get_running_loop().time() + settings.shutdown_timeout_seconds
+        )
 
         # Stop ingress before checking queue.join(), otherwise the MQTT task
         # could enqueue one final message just after the queue looked empty.
         try:
             await asyncio.wait_for(
                 asyncio.shield(tasks["mqtt"]),
-                timeout=min(5.0, settings.shutdown_timeout_seconds),
+                timeout=settings.shutdown_timeout_seconds + 1,
             )
         except TimeoutError:
             tasks["mqtt"].cancel()
@@ -127,9 +136,13 @@ async def run_service(settings: Settings) -> None:
             if failure is None:
                 failure = exc
 
+        writer_stop.set()
         try:
             await asyncio.wait_for(
-                queue.join(), timeout=settings.shutdown_timeout_seconds
+                queue.join(),
+                timeout=max(
+                    0.001, shutdown_deadline - asyncio.get_running_loop().time()
+                ),
             )
         except TimeoutError:
             log_event(

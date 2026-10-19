@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     mqtt_username: str | None = None
     mqtt_password: SecretStr | None = None
     mqtt_topic: str = "estacoes/+/dados"
-    mqtt_client_id: str = "station-ingest-01"
+    mqtt_client_id: str = Field(default="station-ingest-01", min_length=1)
     mqtt_keepalive: int = Field(default=60, ge=1)
     mqtt_max_queued_incoming_messages: int = Field(default=50_000, ge=1)
     mqtt_tls: bool = False
@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     flush_interval_ms: int = Field(default=50, ge=1)
     max_payload_bytes: int = Field(default=256 * 1024, ge=1)
     retention_days: int = Field(default=7, ge=1)
+    retention_enabled: bool = False
     retention_interval_seconds: float = Field(default=60.0, gt=0)
     retry_initial_seconds: float = Field(default=0.25, gt=0)
     retry_max_seconds: float = Field(default=30.0, gt=0)

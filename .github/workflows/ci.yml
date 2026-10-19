@@ -11,7 +11,7 @@ on:
   pull_request:
     branches: [dev, main]
   push:
-    branches: [dev, main]
+    branches: [dev, main, 'SCRUM-*']
   workflow_dispatch:
 
 concurrency:
@@ -122,6 +122,11 @@ jobs:
           if skipped:
               print(f"::error::{skipped} teste(s) pulado(s). Confira os serviços e as variáveis TEST_* do job.")
               sys.exit(1)
+          cases = list(root.iter("testcase"))
+          assert cases, "No tests were reported"
+          assert any("test_pg_store_writes_readings_and_last_communication" in c.attrib["name"] for c in cases)
+          assert any("test_real_mqtt_to_redis_round_trip" in c.attrib["name"] for c in cases)
+          assert sum("test_killed_receiver_redelivers_unacked_message" in c.attrib["name"] for c in cases) == 2
           PY
 
       - name: Quality Gate de cobertura (DoD 80%)
@@ -153,8 +158,13 @@ jobs:
             reports/
             coverage.xml
             coverage.json
+            dist/
           retention-days: 7
           if-no-files-found: warn
+
+      - name: Encerrar broker descartável
+        if: always()
+        run: docker rm -f mosquitto || true
 
   docker:
     name: Validar build da imagem Docker
@@ -169,7 +179,10 @@ jobs:
           persist-credentials: false
 
       - name: Build da imagem (sem push)
-        run: docker build -t api-dsm-4-recepcao-dados:ci-${{ github.sha }} .
+        run: |
+          image_tag="api-dsm-4-recepcao-dados:ci-${{ github.sha }}"
+          docker build -t "$image_tag" .
+          test "$(docker run --rm --entrypoint id "$image_tag" -u)" != 0
 
   comment:
     name: Comentar resultado no PR

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Sequence
 from typing import Any, Protocol
 
@@ -60,7 +61,14 @@ class RedisStreamWriter:
             if not batch:
                 continue
             await self._persist_with_retry(batch)
-            for _ in batch:
+            now_ms = time.time_ns() // 1_000_000
+            for event in batch:
+                self.metrics.record_latency(max(0, now_ms - event.received_at_ms))
+                if event.confirm is not None:
+                    if event.confirm():
+                        self.metrics.mqtt_acked += 1
+                    else:
+                        self.metrics.mqtt_unconfirmed += 1
                 self.queue.task_done()
             self.metrics.persisted += len(batch)
 
@@ -104,7 +112,12 @@ class RedisStreamWriter:
                 pipeline = self.redis.pipeline(transaction=False)
                 for event in batch:
                     pipeline.xadd(self.stream, event.to_stream_fields())
-                await pipeline.execute()
+                results = await pipeline.execute()
+                if len(results) != len(batch) or any(
+                    not isinstance(result, str | bytes) or not result
+                    for result in results
+                ):
+                    raise RuntimeError("Redis returned an incomplete XADD result")
                 return
             except asyncio.CancelledError:
                 raise

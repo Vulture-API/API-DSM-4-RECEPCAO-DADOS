@@ -15,6 +15,10 @@ class ParseFailure:
     reason: str
 
 
+def reject_non_json_constant(value: str) -> None:
+    raise ValueError(f"Invalid JSON constant: {value}")
+
+
 def parse_message(
     payload: bytes,
     topic: str,
@@ -26,8 +30,11 @@ def parse_message(
         return ParseFailure("payload_too_large")
 
     try:
-        decoded: Any = json.loads(payload)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        original_payload = payload.decode("utf-8")
+        decoded: Any = json.loads(
+            original_payload, parse_constant=reject_non_json_constant
+        )
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return ParseFailure("invalid_json")
 
     if not isinstance(decoded, dict):
@@ -41,4 +48,9 @@ def parse_message(
     timestamp = (
         received_at_ms if received_at_ms is not None else time.time_ns() // 1_000_000
     )
-    return BufferedEvent(event=event, topic=topic, received_at_ms=timestamp)
+    return BufferedEvent(
+        event=event,
+        topic=topic,
+        received_at_ms=timestamp,
+        original_payload=original_payload,
+    )
