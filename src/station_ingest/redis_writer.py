@@ -122,7 +122,9 @@ class RedisStreamWriter:
                     level=logging.ERROR,
                     batch_size=len(batch),
                     retry_in_seconds=delay,
-                    error=str(exc),
+                    # Pipeline exceptions can include the complete XADD command
+                    # and payload. Log the class, never the command arguments.
+                    error_type=type(exc).__name__,
                 )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, self.retry_max_seconds)

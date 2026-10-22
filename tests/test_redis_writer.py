@@ -226,3 +226,40 @@ async def test_incomplete_pipeline_result_is_retried_before_ack():
     assert acks == [2, 2]
     assert metrics.redis_retries == 1
     assert metrics.persisted == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_pipeline_does_not_log_command_payload(caplog):
+    import logging
+    from unittest.mock import AsyncMock, Mock
+
+    from redis.exceptions import ResponseError
+
+    redis, pipeline = Mock(), Mock()
+    redis.pipeline.return_value = pipeline
+    pipeline.execute = AsyncMock(
+        side_effect=[
+            ResponseError(
+                "Command # 1 XADD payload PRIVATE_MEASUREMENT caused an error"
+            ),
+            ["1-0"],
+        ]
+    )
+    queue, stop = asyncio.Queue(), asyncio.Event()
+    queue.put_nowait(buffered("station"))
+    stop.set()
+    writer = RedisStreamWriter(
+        redis,
+        "stream",
+        queue,
+        Metrics(),
+        batch_size=1,
+        flush_interval_seconds=0.001,
+        retry_initial_seconds=0.001,
+        retry_max_seconds=0.002,
+        logger=logging.getLogger("test"),
+    )
+    with caplog.at_level(logging.ERROR):
+        await writer.run(stop)
+    assert "PRIVATE_MEASUREMENT" not in caplog.text
+    assert "ResponseError" in caplog.text
