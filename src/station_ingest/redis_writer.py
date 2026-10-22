@@ -21,7 +21,8 @@ class RedisPipeline(Protocol):
 class RedisClient(Protocol):
     def pipeline(self, transaction: bool = False) -> RedisPipeline: ...
 
-    async def eval(self, script: str, numkeys: int, *args: Any) -> Any: ...
+    async def eval(self, script: str, numkeys: int, *args: Any) -> Any:
+        """Execute an atomic script through the Redis client implementation."""
 
 
 class RedisStreamWriter:
