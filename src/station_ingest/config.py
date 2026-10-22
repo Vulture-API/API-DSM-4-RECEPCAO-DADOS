@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     max_payload_bytes: int = Field(default=256 * 1024, ge=1)
     retention_days: int = Field(default=7, ge=1)
     retention_enabled: bool = False
+    retention_required_groups: list[str] = Field(
+        default_factory=lambda: ["postgres-persister"], min_length=1
+    )
+    retention_trim_limit: int = Field(default=10000, ge=1)
+    retention_max_groups: int = Field(default=128, ge=1)
     retention_interval_seconds: float = Field(default=60.0, gt=0)
     retry_initial_seconds: float = Field(default=0.25, gt=0)
     retry_max_seconds: float = Field(default=30.0, gt=0)
@@ -58,6 +63,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_related_values(self) -> Settings:
+        if any(
+            not name.strip() or "\x00" in name
+            for name in self.retention_required_groups
+        ):
+            raise ValueError("retention_required_groups must contain valid group names")
         if self.batch_size > self.queue_max_size:
             raise ValueError("batch_size cannot exceed queue_max_size")
         if self.retry_initial_seconds > self.retry_max_seconds:

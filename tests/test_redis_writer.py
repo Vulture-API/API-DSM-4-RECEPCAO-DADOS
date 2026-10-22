@@ -36,12 +36,9 @@ class FakeRedis:
         assert transaction is False
         return FakePipeline(self)
 
-    async def time(self) -> tuple[int, int]:
-        return (1_700_000_000, 500_000)
-
-    async def xtrim(self, name: str, *, minid: str, approximate: bool) -> int:
-        self.trim_call = (name, minid, approximate)
-        return 3
+    async def eval(self, script, count, stream, age, groups, limit, max_groups):
+        self.trim_call = (stream, age, groups, limit, max_groups)
+        return [3, "1699999940500-0", "age", ""]
 
 
 def buffered(station_id: str) -> BufferedEvent:
@@ -126,13 +123,13 @@ async def test_bounded_queue_applies_backpressure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_retention_uses_redis_clock() -> None:
+async def test_retention_delegates_to_atomic_safe_policy() -> None:
     redis = FakeRedis()
 
     removed = await enforce_retention_once(redis, "stream", 60)
 
     assert removed == 3
-    assert redis.trim_call == ("stream", "1699999940500-0", True)
+    assert redis.trim_call == ("stream", 60, '["postgres-persister"]', 10000, 128)
 
 
 @pytest.mark.asyncio

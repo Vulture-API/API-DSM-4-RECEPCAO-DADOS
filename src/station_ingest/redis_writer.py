@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from station_ingest.logging_config import log_event
 from station_ingest.metrics import Metrics
 from station_ingest.models import BufferedEvent
+from station_ingest.retention import enforce_once
 
 
 class RedisPipeline(Protocol):
@@ -20,15 +21,7 @@ class RedisPipeline(Protocol):
 class RedisClient(Protocol):
     def pipeline(self, transaction: bool = False) -> RedisPipeline: ...
 
-    async def time(self) -> tuple[int, int]: ...
-
-    async def xtrim(
-        self,
-        name: str,
-        *,
-        minid: str,
-        approximate: bool,
-    ) -> int: ...
+    async def eval(self, script: str, numkeys: int, *args: Any) -> Any: ...
 
 
 class RedisStreamWriter:
@@ -140,14 +133,7 @@ async def enforce_retention_once(
     stream: str,
     retention_seconds: int,
 ) -> int:
-    seconds, microseconds = await redis.time()
-    now_ms = seconds * 1000 + microseconds // 1000
-    cutoff_ms = max(0, now_ms - retention_seconds * 1000)
-    return await redis.xtrim(
-        stream,
-        minid=f"{cutoff_ms}-0",
-        approximate=True,
-    )
+    return (await enforce_once(redis, stream, retention_seconds)).removed
 
 
 async def run_retention(
@@ -157,12 +143,29 @@ async def run_retention(
     interval_seconds: float,
     stop_event: asyncio.Event,
     logger: logging.Logger,
+    *,
+    required_groups: list[str] | None = None,
+    trim_limit: int = 10000,
+    max_groups: int = 128,
 ) -> None:
     while not stop_event.is_set():
         try:
-            removed = await enforce_retention_once(redis, stream, retention_seconds)
-            if removed:
-                log_event(logger, "redis_stream_trimmed", removed=removed)
+            result = await enforce_once(
+                redis,
+                stream,
+                retention_seconds,
+                required_groups=required_groups,
+                trim_limit=trim_limit,
+                max_groups=max_groups,
+            )
+            log_event(
+                logger,
+                "redis_retention_status",
+                removed=result.removed,
+                boundary=result.boundary,
+                reason=result.reason,
+                blocking_group=result.blocking_group,
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -170,7 +173,7 @@ async def run_retention(
                 logger,
                 "redis_retention_failed",
                 level=logging.ERROR,
-                error=str(exc),
+                error_type=type(exc).__name__,
             )
 
         try:
