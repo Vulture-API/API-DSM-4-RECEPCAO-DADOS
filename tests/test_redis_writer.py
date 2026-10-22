@@ -261,5 +261,8 @@ async def test_failed_pipeline_does_not_log_command_payload(caplog):
     )
     with caplog.at_level(logging.ERROR):
         await writer.run(stop)
-    assert "PRIVATE_MEASUREMENT" not in caplog.text
-    assert "ResponseError" in caplog.text
+    from station_ingest.logging_config import JsonFormatter
+
+    rendered = "\n".join(JsonFormatter().format(record) for record in caplog.records)
+    assert "PRIVATE_MEASUREMENT" not in rendered
+    assert "ResponseError" in rendered
