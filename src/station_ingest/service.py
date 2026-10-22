@@ -70,7 +70,11 @@ async def run_service(settings: Settings) -> None:
         ),
     }
     if settings.retention_enabled:
-        log_event(logger, "unsafe_age_retention_enabled", level=logging.WARNING)
+        log_event(
+            logger,
+            "safe_retention_enabled",
+            required_groups=settings.retention_required_groups,
+        )
         tasks["retention"] = asyncio.create_task(
             run_retention(
                 redis,
@@ -79,10 +83,13 @@ async def run_service(settings: Settings) -> None:
                 settings.retention_interval_seconds,
                 stop_event,
                 logger,
+                required_groups=settings.retention_required_groups,
+                trim_limit=settings.retention_trim_limit,
+                max_groups=settings.retention_max_groups,
             )
         )
     else:
-        log_event(logger, "retention_disabled", policy_task="SCRUM-530")
+        log_event(logger, "retention_disabled")
     stop_waiter = asyncio.create_task(stop_event.wait())
     failure: BaseException | None = None
 

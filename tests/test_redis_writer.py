@@ -36,12 +36,9 @@ class FakeRedis:
         assert transaction is False
         return FakePipeline(self)
 
-    async def time(self) -> tuple[int, int]:
-        return (1_700_000_000, 500_000)
-
-    async def xtrim(self, name: str, *, minid: str, approximate: bool) -> int:
-        self.trim_call = (name, minid, approximate)
-        return 3
+    async def eval(self, script, count, stream, age, groups, limit, max_groups):
+        self.trim_call = (stream, age, groups, limit, max_groups)
+        return [3, "1699999940500-0", "age", ""]
 
 
 def buffered(station_id: str) -> BufferedEvent:
@@ -126,13 +123,13 @@ async def test_bounded_queue_applies_backpressure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_retention_uses_redis_clock() -> None:
+async def test_retention_delegates_to_atomic_safe_policy() -> None:
     redis = FakeRedis()
 
     removed = await enforce_retention_once(redis, "stream", 60)
 
     assert removed == 3
-    assert redis.trim_call == ("stream", "1699999940500-0", True)
+    assert redis.trim_call == ("stream", 60, '["postgres-persister"]', 10000, 128)
 
 
 @pytest.mark.asyncio
@@ -229,3 +226,43 @@ async def test_incomplete_pipeline_result_is_retried_before_ack():
     assert acks == [2, 2]
     assert metrics.redis_retries == 1
     assert metrics.persisted == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_pipeline_does_not_log_command_payload(caplog):
+    import logging
+    from unittest.mock import AsyncMock, Mock
+
+    from redis.exceptions import ResponseError
+
+    redis, pipeline = Mock(), Mock()
+    redis.pipeline.return_value = pipeline
+    pipeline.execute = AsyncMock(
+        side_effect=[
+            ResponseError(
+                "Command # 1 XADD payload PRIVATE_MEASUREMENT caused an error"
+            ),
+            ["1-0"],
+        ]
+    )
+    queue, stop = asyncio.Queue(), asyncio.Event()
+    queue.put_nowait(buffered("station"))
+    stop.set()
+    writer = RedisStreamWriter(
+        redis,
+        "stream",
+        queue,
+        Metrics(),
+        batch_size=1,
+        flush_interval_seconds=0.001,
+        retry_initial_seconds=0.001,
+        retry_max_seconds=0.002,
+        logger=logging.getLogger("test"),
+    )
+    with caplog.at_level(logging.ERROR):
+        await writer.run(stop)
+    from station_ingest.logging_config import JsonFormatter
+
+    rendered = "\n".join(JsonFormatter().format(record) for record in caplog.records)
+    assert "PRIVATE_MEASUREMENT" not in rendered
+    assert "ResponseError" in rendered

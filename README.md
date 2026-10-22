@@ -78,16 +78,49 @@ Logs `ingest_metrics`: recebidos, gravados, rejeitados por motivo, retentativas,
 reconexões, saturações, ACKs, profundidades da ponte/fila, taxa gravada e latência
 média/máxima da entrada até a resposta Redis. Não despejam payload completo.
 
-## Retenção
+## Retenção segura — SCRUM-530
 
-`INGEST_RETENTION_ENABLED=false` por padrão: nenhum corte automático por idade.
-A limpeza que protege backlog e pendências será implementada na **SCRUM-530**.
-O modo legado de `XTRIM MINID ~` por idade pode ser ativado explicitamente, mas é
-inseguro para eventos ainda não processados e registra aviso ao iniciar.
+`INGEST_RETENTION_ENABLED=false` continua sendo o padrão. Quando ativada, a
+recepção executa um único script Lua atômico Redis 7: `TIME`, `XINFO GROUPS`,
+`XPENDING` de **todos** os grupos e `XTRIM MINID ~ ... LIMIT`. O limite é o menor
+entre idade configurada, último ID entregue por grupo e menor ID pendente por
+grupo. O limite é exclusivo: a própria entrada de fronteira permanece. A
+aproximação pode conservar entradas adicionais. Não existe fallback por idade,
+MAXLEN ou uso de recursos exclusivos do Redis 8. IDs são comparados por componentes
+decimais textuais, inclusive acima de 2^53.
 
-Dimensione memória/disco, configure persistência Redis e broker e monitore atraso,
-evicções e disponibilidade. Os testes de redelivery mantêm o broker disponível;
-`persistence false` não garante recuperação após reinício dele.
+Configuração (listas no ambiente usam JSON):
+
+```dotenv
+INGEST_RETENTION_ENABLED=false
+INGEST_RETENTION_DAYS=7
+INGEST_RETENTION_INTERVAL_SECONDS=60
+INGEST_RETENTION_REQUIRED_GROUPS=["postgres-persister"]
+INGEST_RETENTION_TRIM_LIMIT=10000
+INGEST_RETENTION_MAX_GROUPS=128
+```
+
+Sem grupos, sem um grupo obrigatório, com metadados inválidos, acima do limite de
+grupos ou com erro Redis, nenhuma limpeza acontece. Um grupo novo em `0-0` bloqueia
+a limpeza; um grupo abandonado com PEL também. Configure todos os grupos essenciais
+antes de ativar a política. Criar um grupo posteriormente não restaura histórico
+já removido. Não use `XGROUP SETID`, `DELCONSUMER`, XDEL, MAXLEN ou expurgo manual
+para esconder atrasos. A proteção depende de consumidores que só confirmam após
+destino durável; não corrige os descartes do persistidor legado.
+
+`redis_retention_status` informa `removed`, `boundary`, `reason` e
+`blocking_group`, mesmo sem remoções. `redis_retention_failed` registra o tipo de
+falha. Alertar se a fronteira parar enquanto memória/backlog crescem; investigar
+o grupo/PEL indicado e recuperar o tratamento. Nunca contornar o bloqueio com
+corte só por idade. Aumentar capacidade ou pausar publicadores conforme o runbook
+do ambiente. Redis deve ter persistência dimensionada e política **noeviction**;
+essa rotina não impede perdas por evicção, perda de disco ou exclusão externa.
+Monitore memória/disco, tamanho do Stream e indisponibilidade prolongada.
+
+A limpeza permanece neste serviço; o tratamento não executa XTRIM. Não foi
+ativada no Compose nesta entrega. Durabilidade do MQTT/Redis depende da
+configuração operacional; os testes de redelivery mantêm o broker disponível,
+e `persistence false` não protege reinício do broker.
 
 ## Persistidor legado
 
