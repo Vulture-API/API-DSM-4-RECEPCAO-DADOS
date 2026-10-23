@@ -51,8 +51,6 @@ async def test_shutdown_keeps_writer_alive_until_admission_stops(monkeypatch):
                 _env_file=None,
                 flush_interval_ms=1,
                 shutdown_timeout_seconds=0.2,
-                # Reception must never attempt a PostgreSQL connection.
-                database_url="postgresql://unavailable:1/missing",
             )
         ),
         2,

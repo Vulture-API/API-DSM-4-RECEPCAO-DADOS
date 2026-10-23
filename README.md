@@ -106,7 +106,7 @@ a limpeza; um grupo abandonado com PEL também. Configure todos os grupos essenc
 antes de ativar a política. Criar um grupo posteriormente não restaura histórico
 já removido. Não use `XGROUP SETID`, `DELCONSUMER`, XDEL, MAXLEN ou expurgo manual
 para esconder atrasos. A proteção depende de consumidores que só confirmam após
-destino durável; não corrige os descartes do persistidor legado.
+destino durável. A execução do consumo pertence ao tratamento independente.
 
 `redis_retention_status` informa `removed`, `boundary`, `reason` e
 `blocking_group`, mesmo sem remoções. `redis_retention_failed` registra o tipo de
@@ -122,14 +122,16 @@ ativada no Compose nesta entrega. Durabilidade do MQTT/Redis depende da
 configuração operacional; os testes de redelivery mantêm o broker disponível,
 e `persistence false` não protege reinício do broker.
 
-## Persistidor legado
+## Tratamento independente
 
-`python -m station_ingest persist` continua disponível, isolado em outro processo,
-com `asyncpg`, configuração e testes preservados até **SCRUM-532**. Exige
-`INGEST_DATABASE_URL` e usa as variáveis `INGEST_PERSIST_*`. Ainda contém as
-limitações de associação, descarte, idempotência e recuperação descritas no
-contrato. Sua retirada depende da substituição operacional em **SCRUM-531**;
-o novo modo de inspeção não o substitui como gravador.
+A recepção executa somente MQTT → Redis, sem cliente ou configuração PostgreSQL.
+O serviço [API-DSM-4-PERSISTENCIA-DADOS](https://github.com/Vulture-API/API-DSM-4-PERSISTENCIA-DADOS)
+executa `station-persist consume` com sua própria imagem e configuração `PERSIST_*`.
+Ele realiza associação, validação, leituras, ocorrências, quarentena e recuperação.
+
+O comando padrão e `station-ingest ingest` (também `python -m station_ingest ingest`)
+continuam disponíveis. `persist` foi removido na **SCRUM-532** e encerra com erro e
+orientação, sem iniciar conexões nem redirecionar para outro serviço.
 
 ## Verificação
 
@@ -139,14 +141,13 @@ ruff format --check .
 RUN_INTEGRATION=1 \
 TEST_MQTT_HOST=127.0.0.1 TEST_MQTT_PORT=1883 \
 TEST_REDIS_URL=redis://127.0.0.1:6379/15 \
-TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/telemetry_test \
 pytest --cov --cov-report=term-missing --junitxml=reports/junit.xml
 python -m build
 docker build -t station-ingest:local .
 ```
 
-Use **Mosquitto, Redis e PostgreSQL descartáveis**. Os testes usam identificadores
-aleatórios; o teste PostgreSQL legado cria schema próprio e o remove ao final.
+Use **Mosquitto e Redis descartáveis**, sem banco ou credenciais PostgreSQL.
+Os testes usam identificadores aleatórios.
 Sem `RUN_INTEGRATION=1`, integrações ficam ignoradas no desenvolvimento local.
 O CI exige todas as integrações sem skips, cobertura mínima de 80%, pacote e build
 Docker sem usuário root. Inclui queda real do receptor antes do XADD e após XADD
@@ -165,7 +166,8 @@ O workflow `.github/workflows/ci.yml` mantém os checks obrigatórios
 formatação com Ruff fixado, testes unitários e integrações descartáveis, nenhum
 skip permitido, cobertura mínima de 80%, pacote e imagem sem root. Os relatórios
 ficam nos artefatos da execução; o resultado é registrado no PR pelo workflow.
-Os testes de redelivery e a suíte do persistidor legado também são obrigatórios.
+Os testes de redelivery e retenção segura são obrigatórios. O CI também verifica
+que o pacote e a imagem não incluem `asyncpg` nem o módulo de persistência antigo.
 
 O workflow `.github/workflows/codeql.yml` preserva a análise Python de qualidade
 e segurança adicionada na SCRUM-377, em PRs, dev/main e na agenda configurada.

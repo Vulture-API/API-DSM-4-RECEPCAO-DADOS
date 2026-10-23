@@ -2,7 +2,7 @@
 # SCRUM-377 — Pipeline de Integração Contínua da recepção de dados (Python)
 #
 # Etapas: instalação limpa -> lint (ruff) -> formatação -> testes unitários e
-# de integração (MQTT, Redis e PostgreSQL descartáveis) -> Quality Gate 80%
+# de integração (MQTT e Redis descartáveis) -> Quality Gate 80%
 # -> build da imagem Docker (sem push).
 # ---------------------------------------------------------------------------
 name: CI
@@ -34,17 +34,6 @@ jobs:
       coverage: ${{ steps.coverage_gate.outputs.coverage }}
 
     services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
       redis:
         image: redis:7-alpine
         ports:
@@ -60,7 +49,6 @@ jobs:
       TEST_MQTT_HOST: localhost
       TEST_MQTT_PORT: "1883"
       TEST_REDIS_URL: redis://localhost:6379/15
-      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
 
     steps:
       - name: Checkout do repositório
@@ -96,6 +84,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test,lint]"
           pip check
+          python -c "import importlib.util; assert importlib.util.find_spec('asyncpg') is None; assert importlib.util.find_spec('station_ingest.persistence') is None"
 
       - name: Lint
         run: ruff check --output-format=github .
@@ -124,7 +113,8 @@ jobs:
               sys.exit(1)
           cases = list(root.iter("testcase"))
           assert cases, "No tests were reported"
-          assert any("test_pg_store_writes_readings_and_last_communication" in c.attrib["name"] for c in cases)
+          for name in ["test_main_rejects_removed_persist_before_configuration", "test_ack_follows_successful_xadd_and_retry", "test_real_retention_never_removes_pending_or_undelivered"]:
+              assert any(name in c.attrib["name"] for c in cases), f"Missing {name}"
           assert any("test_real_mqtt_to_redis_round_trip" in c.attrib["name"] for c in cases)
           assert sum("test_killed_receiver_redelivers_unacked_message" in c.attrib["name"] for c in cases) == 2
           PY
@@ -148,6 +138,15 @@ jobs:
         run: |
           pip install build
           python -m build --wheel --outdir dist/
+          python -m venv "$RUNNER_TEMP/receiver-wheel"
+          "$RUNNER_TEMP/receiver-wheel/bin/pip" install dist/*.whl
+          "$RUNNER_TEMP/receiver-wheel/bin/pip" check
+          "$RUNNER_TEMP/receiver-wheel/bin/python" -c "import importlib.util; assert importlib.util.find_spec('asyncpg') is None; assert importlib.util.find_spec('station_ingest.persistence') is None"
+          if "$RUNNER_TEMP/receiver-wheel/bin/station-ingest" persist > removed-command.log 2>&1; then
+            echo "::error::O modo persist não pode executar na recepção."
+            exit 1
+          fi
+          grep -F 'station-persist consume' removed-command.log
 
       - name: Publicar relatórios
         if: always()
@@ -183,6 +182,12 @@ jobs:
           image_tag="api-dsm-4-recepcao-dados:ci-${{ github.sha }}"
           docker build -t "$image_tag" .
           test "$(docker run --rm --entrypoint id "$image_tag" -u)" != 0
+          docker run --rm --entrypoint python "$image_tag" -c "import importlib.util; assert importlib.util.find_spec('asyncpg') is None; assert importlib.util.find_spec('station_ingest.persistence') is None"
+          if docker run --rm --network none "$image_tag" persist > removed-command.log 2>&1; then
+            echo "::error::O modo persist não pode executar na recepção."
+            exit 1
+          fi
+          grep -F 'station-persist consume' removed-command.log
 
   comment:
     name: Comentar resultado no PR
