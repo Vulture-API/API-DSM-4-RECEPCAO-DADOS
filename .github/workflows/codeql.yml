@@ -1,0 +1,45 @@
+# SCRUM-377 — Análise estática de qualidade e segurança (CodeQL).
+# Roda em PR, na dev/main e toda segunda; os alertas ficam na aba Security.
+name: CodeQL
+
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev, main]
+  schedule:
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Análise CodeQL (python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Inicializar CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          build-mode: none
+          queries: security-and-quality
+
+      - name: Analisar
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"

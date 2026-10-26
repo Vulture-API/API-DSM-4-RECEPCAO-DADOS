@@ -21,6 +21,8 @@ def test_parse_valid_message() -> None:
     ("payload", "reason"),
     [
         (b"not-json", "invalid_json"),
+        (b'{"estacao_id":"e-1","value":NaN}', "invalid_json"),
+        (b'{"estacao_id":"e-1","value":Infinity}', "invalid_json"),
         (b"[]", "payload_not_object"),
         (b'{"unix_time":1}', "invalid_or_missing_station_id"),
         (b'{"estacao_id":""}', "invalid_or_missing_station_id"),
@@ -35,3 +37,10 @@ def test_payload_size_is_checked_before_json_decode() -> None:
     result = parse_message(b'{"estacao_id":"e-1"}', "topic", 3)
     assert result == ParseFailure("payload_too_large")
 
+
+def test_original_json_preserves_numeric_representation_and_whitespace():
+    payload = b'{ "estacao_id": "e-1", "sensor": 1e1000, "unix_time": null }'
+    result = parse_message(payload, "topic", len(payload))
+    assert isinstance(result, BufferedEvent)
+    assert result.to_stream_fields()["payload"] == payload.decode()
+    assert result.to_stream_fields()["unix_time"] == "null"

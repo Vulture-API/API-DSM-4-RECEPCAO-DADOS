@@ -1,138 +1,185 @@
 # Station Ingest
 
-Serviço assíncrono para receber telemetria via MQTT, validar o envelope com
-Pydantic e adicionar os eventos a um Redis Stream. O Redis é um buffer de sete
-dias; a persistência histórica deve ser feita por outro consumidor.
+Recepção Python de telemetria: **MQTT → Redis Stream**. Valida apenas o envelope;
+validação de negócio, relações e persistência definitiva pertencem ao serviço
+independente `API-DSM-4-PERSISTENCIA-DADOS`.
 
-## Contrato da mensagem
+[Contrato oficial e evolução no Confluence](https://vultureapi.atlassian.net/wiki/spaces/V/pages/46333954).
 
-O payload MQTT deve ser um objeto JSON. `estacao_id` é obrigatório e deve ser
-uma string não vazia. `unix_time` representa segundos Unix e é opcional: se
-estiver ausente, negativo ou com tipo inválido, será armazenado como `null`.
-Quaisquer outros campos são preservados.
+## Contrato
+
+Assinatura padrão `estacoes/+/dados`, publicação `estacoes/<MAC>/dados` e Stream
+`telemetry:ingest`. O payload é objeto JSON UTF-8, com `estacao_id` string não
+vazia e até `INGEST_MAX_PAYLOAD_BYTES` (262144 por padrão). Não consulta cadastros
+nem PostgreSQL. JSON inválido, raiz não objeto, identificação inválida e tamanho
+excessivo são rejeitados, contabilizados por motivo e confirmados no MQTT.
+
+Cada entrada mantém os cinco campos:
+
+| Campo | Conteúdo |
+| --- | --- |
+| `estacao_id` | Identificação extraída, sem espaços externos |
+| `unix_time` | Inteiro não negativo em segundos Unix, como texto; nos demais casos, texto `null` |
+| `received_at` | Milissegundos Unix capturados na entrada; estável nas retentativas locais |
+| `topic` | Tópico original |
+| `payload` | JSON UTF-8 original, incluindo tipos, valores e campos adicionais |
 
 ```json
-{
-  "estacao_id": "estacao-42",
-  "unix_time": 1760000000,
-  "temperatura": 23.7,
-  "umidade": 64
-}
+{"estacao_id":"00:1A:2B:3C:4D:01","unix_time":"inválido","temp":23.7,"umid":64,"extra":{"versao":2}}
 ```
 
-Cada entrada em `telemetry:ingest` contém os campos `estacao_id`, `unix_time`,
-`received_at` (milissegundos Unix), `topic` e `payload` (JSON normalizado).
-Duplicatas não são removidas.
+Nesse exemplo, o `unix_time` extraído é `"null"`, mas o payload mantém
+`"inválido"`. Ausência de `unix_time`, `null` explícito e valores inválidos são
+distintos no payload. Eventos antigos já normalizados não permitem reconstruir
+o valor original; o tratamento deve identificar essa limitação e usar o instante
+de recepção conforme o contrato. A recepção não interpreta as medições.
 
-Mensagens com JSON inválido, raiz que não seja objeto, `estacao_id` ausente ou
-inválido, ou tamanho acima de `INGEST_MAX_PAYLOAD_BYTES` são descartadas e
-contabilizadas nos logs.
+## Execução
 
-## Execução local
-
-Requer Python 3.12+, um broker MQTT e Redis acessíveis.
+Python 3.12+, broker MQTT e Redis acessíveis:
 
 ```bash
 python -m venv .venv
 . .venv/bin/activate
-pip install -e '.[test]'
+pip install -e '.[test,lint]'
 cp .env.example .env
 python -m station_ingest
 ```
 
-Todas as configurações usam o prefixo `INGEST_`; consulte `.env.example` para
-a lista completa. URLs `redis://` e `rediss://` são aceitas. Para TLS MQTT,
-ative `INGEST_MQTT_TLS` e, quando necessário, informe CA e o par certificado /
-chave do cliente.
+Configurações `INGEST_` estão em `.env.example`. Autenticação MQTT, TLS com CA e
+certificado/chave e URLs Redis `redis://`/`rediss://` continuam disponíveis.
+O processo de recepção funciona sem `INGEST_DATABASE_URL`.
 
-As filas do serviço e do cliente MQTT têm limites configuráveis para proteger
-a memória durante indisponibilidades. Como o `aiomqtt` 2.x confirma QoS 1
-automaticamente, o broker não consegue aplicar backpressure fim a fim depois
-desse ACK; monitore a profundidade da fila e dimensione os limites para a maior
-indisponibilidade aceitável.
+## Confirmação, filas e falhas
 
-O serviço usa MQTT 3.1.1, QoS 1, sessão persistente e um client ID fixo. Não
-execute duas instâncias com o mesmo `INGEST_MQTT_CLIENT_ID`: o broker derrubará
-uma delas. Para escalar horizontalmente, particione tópicos e atribua um client
-ID exclusivo por partição.
+Usa Paho MQTT 2.x, callbacks versão 2, MQTT 3.1.1, sessão persistente, client ID
+configurável e assinatura QoS 1. [API pública de confirmação manual](https://eclipse.dev/paho/files/paho.mqtt.python/html/client.html#paho.mqtt.client.Client.ack).
+Uma mensagem válida só é confirmada após resposta bem-sucedida de seu `XADD`.
+Falha ou resultado ambíguo provoca retentativa e pode produzir duplicata.
 
-## Gravação no PostgreSQL (`persist`)
+A ponte da thread MQTT para `asyncio` e a fila do gravador têm capacidades
+limitadas. Saturação fecha a conexão sem confirmar mensagens ainda não gravadas;
+a reconexão usa o mesmo client ID e sessão. Confirmações de conexões anteriores
+são invalidadas. No encerramento a admissão para, o gravador drena dentro do prazo
+e a conexão fecha; trabalho não concluído permanece sem confirmação.
 
-O mesmo pacote tem um segundo processo, que lê o Redis Stream e grava as leituras no PostgreSQL:
+A garantia depende de publicação QoS 1 e da disponibilidade/durabilidade do
+broker e Redis. QoS 0 não tem proteção equivalente. Não há entrega exatamente
+uma vez, deduplicação ou garantia contra perda de armazenamento do broker/Redis.
+`received_at` é preservado durante retentativas locais; redelivery MQTT após
+reconexão recebe um novo instante de recepção, pois o protocolo atual não inclui
+uma identidade durável de evento. O tratamento deve considerar essa limitação.
 
-```bash
-python -m station_ingest persist      # a recepção continua sendo: python -m station_ingest
+Não execute duas instâncias com o mesmo `INGEST_MQTT_CLIENT_ID`. Para particionar
+consumo, defina tópicos e client IDs próprios; assinatura comum em duas instâncias
+pode duplicar o recebimento.
+
+Logs `ingest_metrics`: recebidos, gravados, rejeitados por motivo, retentativas,
+reconexões, saturações, ACKs, profundidades da ponte/fila, taxa gravada e latência
+média/máxima da entrada até a resposta Redis. Não despejam payload completo.
+
+## Retenção segura — SCRUM-530
+
+`INGEST_RETENTION_ENABLED=false` continua sendo o padrão. Quando ativada, a
+recepção executa um único script Lua atômico Redis 7: `TIME`, `XINFO GROUPS`,
+`XPENDING` de **todos** os grupos e `XTRIM MINID ~ ... LIMIT`. O limite é o menor
+entre idade configurada, último ID entregue por grupo e menor ID pendente por
+grupo. O limite é exclusivo: a própria entrada de fronteira permanece. A
+aproximação pode conservar entradas adicionais. Não existe fallback por idade,
+MAXLEN ou uso de recursos exclusivos do Redis 8. IDs são comparados por componentes
+decimais textuais, inclusive acima de 2^53.
+
+Configuração (listas no ambiente usam JSON):
+
+```dotenv
+INGEST_RETENTION_ENABLED=false
+INGEST_RETENTION_DAYS=7
+INGEST_RETENTION_INTERVAL_SECONDS=60
+INGEST_RETENTION_REQUIRED_GROUPS=["postgres-persister"]
+INGEST_RETENTION_TRIM_LIMIT=10000
+INGEST_RETENTION_MAX_GROUPS=128
 ```
 
-- Consome `telemetry:ingest` com consumer group (`INGEST_PERSIST_GROUP`). O `XACK` só acontece depois do `COMMIT`. Se o processo cair no meio, o lote é regravado ao reiniciar (entrega "pelo menos uma vez").
-- `estacao_id` é o MAC da estação (`stations.mac_address`). O MAC é aceito com `:`, com `-` ou sem separador. Um valor só com dígitos é tratado como `stations.id`.
-- Cada outra chave numérica do payload é o `local_identifier` de um sensor da estação e vira uma linha em `readings`.
-- Chaves sem sensor e estações desconhecidas são ignoradas e contadas no log `readings_persisted`.
-- Atualiza `stations.last_communication_at`, que alimenta o status Online/Offline, e o motor de regras do serviço de alertas passa a enxergar as leituras.
-- Sem `unix_time`, a leitura usa o instante de recepção.
+Sem grupos, sem um grupo obrigatório, com metadados inválidos, acima do limite de
+grupos ou com erro Redis, nenhuma limpeza acontece. Um grupo novo em `0-0` bloqueia
+a limpeza; um grupo abandonado com PEL também. Configure todos os grupos essenciais
+antes de ativar a política. Criar um grupo posteriormente não restaura histórico
+já removido. Não use `XGROUP SETID`, `DELCONSUMER`, XDEL, MAXLEN ou expurgo manual
+para esconder atrasos. A proteção depende de consumidores que só confirmam após
+destino durável. A execução do consumo pertence ao tratamento independente.
 
-Variáveis: `INGEST_DATABASE_URL` (obrigatória), `INGEST_PERSIST_GROUP`, `INGEST_PERSIST_CONSUMER`, `INGEST_PERSIST_BATCH_SIZE` e `INGEST_PERSIST_BLOCK_MS`.
+`redis_retention_status` informa `removed`, `boundary`, `reason` e
+`blocking_group`, mesmo sem remoções. `redis_retention_failed` registra o tipo de
+falha. Alertar se a fronteira parar enquanto memória/backlog crescem; investigar
+o grupo/PEL indicado e recuperar o tratamento. Nunca contornar o bloqueio com
+corte só por idade. Aumentar capacidade ou pausar publicadores conforme o runbook
+do ambiente. Redis deve ter persistência dimensionada e política **noeviction**;
+essa rotina não impede perdas por evicção, perda de disco ou exclusão externa.
+Monitore memória/disco, tamanho do Stream e indisponibilidade prolongada.
 
-## Docker
+A limpeza permanece neste serviço; o tratamento não executa XTRIM. Não foi
+ativada no Compose nesta entrega. Durabilidade do MQTT/Redis depende da
+configuração operacional; os testes de redelivery mantêm o broker disponível,
+e `persistence false` não protege reinício do broker.
 
-```bash
-docker build -t station-ingest:latest .
-docker run --rm --env-file .env station-ingest:latest            # recepção
-docker run --rm --env-file .env station-ingest:latest persist    # gravação no Postgres
-```
+## Tratamento independente
 
-A imagem contém apenas o serviço. Broker MQTT e Redis são externos.
+A recepção executa somente MQTT → Redis, sem cliente ou configuração PostgreSQL.
+O serviço [API-DSM-4-PERSISTENCIA-DADOS](https://github.com/Vulture-API/API-DSM-4-PERSISTENCIA-DADOS)
+executa `station-persist consume` com sua própria imagem e configuração `PERSIST_*`.
+Ele realiza associação, validação, leituras, ocorrências, quarentena e recuperação.
 
-## Retenção e operação do Redis
+O comando padrão e `station-ingest ingest` (também `python -m station_ingest ingest`)
+continuam disponíveis. `persist` foi removido na **SCRUM-532** e encerra com erro e
+orientação, sem iniciar conexões nem redirecionar para outro serviço.
 
-O serviço executa periodicamente `XTRIM MINID ~` usando o relógio do Redis. O
-limite padrão é sete dias e é aproximado para evitar o custo de cortes exatos.
-
-Para o ambiente de produção:
-
-- habilite AOF com política de `fsync` compatível com a tolerância de perda;
-- use replicação e monitore failover, memória e evicções;
-- alerte sobre consumo de memória e atraso do grupo consumidor;
-- dimensione a instância para sete dias no pico, incluindo overhead do Stream;
-- não configure política de eviction que remova o Stream silenciosamente.
-
-O `aiomqtt` 2.5 confirma mensagens QoS 1 antes de o código de aplicação gravar
-no Redis. Sessão persistente protege períodos desconectados, mas permanece uma
-janela de perda se o processo cair entre esse ACK e o `XADD`. Duplicatas também
-podem ocorrer e o consumidor posterior deve ser idempotente.
-
-## Testes
+## Verificação
 
 ```bash
-pytest
-```
-
-O teste de integração é desativado por padrão. Para executá-lo contra serviços
-reais:
-
-```bash
+ruff check .
+ruff format --check .
 RUN_INTEGRATION=1 \
-TEST_MQTT_HOST=localhost \
-TEST_MQTT_PORT=1883 \
-TEST_REDIS_URL=redis://localhost:6379/15 \
-pytest -m integration
+TEST_MQTT_HOST=127.0.0.1 TEST_MQTT_PORT=1883 \
+TEST_REDIS_URL=redis://127.0.0.1:6379/15 \
+pytest --cov --cov-report=term-missing --junitxml=reports/junit.xml
+python -m build
+docker build -t station-ingest:local .
 ```
 
-O teste cria chaves e tópicos com nomes aleatórios e remove o Stream ao final.
+Use **Mosquitto e Redis descartáveis**, sem banco ou credenciais PostgreSQL.
+Os testes usam identificadores aleatórios.
+Sem `RUN_INTEGRATION=1`, integrações ficam ignoradas no desenvolvimento local.
+O CI exige todas as integrações sem skips, cobertura mínima de 80%, pacote e build
+Docker sem usuário root. Inclui queda real do receptor antes do XADD e após XADD
+antes do ACK, aceitando duplicatas no segundo caso.
 
-## Benchmark
-
-Execute contra o ambiente de staging e acompanhe simultaneamente os logs de
-`ingest_metrics` do serviço:
+A imagem executa `python -m station_ingest` como usuário `ingest`:
 
 ```bash
-python scripts/benchmark_publish.py \
-  --host mqtt.example.com \
-  --messages 100000 \
-  --workers 50
+docker run --rm --env-file .env station-ingest:local
 ```
 
-O script informa a taxa de publicação; a taxa persistida, profundidade da fila,
-retentativas e descartes aparecem nos logs estruturados do serviço. O objetivo
-de 10 mil mensagens/s depende da latência e do dimensionamento do broker, rede
-e Redis e deve ser validado no ambiente de implantação.
+## CI e análise de segurança
+
+O workflow `.github/workflows/ci.yml` mantém os checks obrigatórios
+**Lint, testes e build** e **Validar build da imagem Docker**. Executa lint e
+formatação com Ruff fixado, testes unitários e integrações descartáveis, nenhum
+skip permitido, cobertura mínima de 80%, pacote e imagem sem root. Os relatórios
+ficam nos artefatos da execução; o resultado é registrado no PR pelo workflow.
+Os testes de redelivery e retenção segura são obrigatórios. O CI também verifica
+que o pacote e a imagem não incluem `asyncpg` nem o módulo de persistência antigo.
+
+O workflow `.github/workflows/codeql.yml` preserva a análise Python de qualidade
+e segurança adicionada na SCRUM-377, em PRs, dev/main e na agenda configurada.
+
+## Medição de taxa
+
+O publicador de teste requer o extra `test` (aiomqtt apenas para produzir mensagens):
+
+```bash
+python scripts/benchmark_publish.py --host localhost --messages 10000 --workers 10
+```
+
+Compare a taxa publicada com a taxa gravada, filas e latência dos logs
+`ingest_metrics`. Registre versões, carga e configurações do ambiente. Nenhuma
+meta de desempenho é presumida por esta entrega.

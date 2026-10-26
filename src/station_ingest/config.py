@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     mqtt_username: str | None = None
     mqtt_password: SecretStr | None = None
     mqtt_topic: str = "estacoes/+/dados"
-    mqtt_client_id: str = "station-ingest-01"
+    mqtt_client_id: str = Field(default="station-ingest-01", min_length=1)
     mqtt_keepalive: int = Field(default=60, ge=1)
     mqtt_max_queued_incoming_messages: int = Field(default=50_000, ge=1)
     mqtt_tls: bool = False
@@ -40,29 +40,31 @@ class Settings(BaseSettings):
     flush_interval_ms: int = Field(default=50, ge=1)
     max_payload_bytes: int = Field(default=256 * 1024, ge=1)
     retention_days: int = Field(default=7, ge=1)
+    retention_enabled: bool = False
+    retention_required_groups: list[str] = Field(
+        default_factory=lambda: ["postgres-persister"], min_length=1
+    )
+    retention_trim_limit: int = Field(default=10000, ge=1)
+    retention_max_groups: int = Field(default=128, ge=1)
     retention_interval_seconds: float = Field(default=60.0, gt=0)
     retry_initial_seconds: float = Field(default=0.25, gt=0)
     retry_max_seconds: float = Field(default=30.0, gt=0)
     shutdown_timeout_seconds: float = Field(default=30.0, gt=0)
-
-    # Consumidor Redis -> PostgreSQL (python -m station_ingest persist)
-    database_url: str | None = None
-    persist_group: str = "postgres-persister"
-    persist_consumer: str = "persister-01"
-    persist_batch_size: int = Field(default=500, ge=1)
-    persist_block_ms: int = Field(default=1000, ge=1)
 
     log_level: str = "INFO"
     metrics_interval_seconds: float = Field(default=30.0, gt=0)
 
     @model_validator(mode="after")
     def validate_related_values(self) -> Settings:
+        if any(
+            not name.strip() or "\x00" in name
+            for name in self.retention_required_groups
+        ):
+            raise ValueError("retention_required_groups must contain valid group names")
         if self.batch_size > self.queue_max_size:
             raise ValueError("batch_size cannot exceed queue_max_size")
         if self.retry_initial_seconds > self.retry_max_seconds:
-            raise ValueError(
-                "retry_initial_seconds cannot exceed retry_max_seconds"
-            )
+            raise ValueError("retry_initial_seconds cannot exceed retry_max_seconds")
         if bool(self.mqtt_tls_cert_file) != bool(self.mqtt_tls_key_file):
             raise ValueError(
                 "mqtt_tls_cert_file and mqtt_tls_key_file must be set together"

@@ -30,11 +30,10 @@ def install_signal_handlers(
 async def run_service(settings: Settings) -> None:
     logger = logging.getLogger("station_ingest")
     stop_event = asyncio.Event()
+    writer_stop = asyncio.Event()
     install_signal_handlers(stop_event)
 
-    queue: asyncio.Queue[BufferedEvent] = asyncio.Queue(
-        maxsize=settings.queue_max_size
-    )
+    queue: asyncio.Queue[BufferedEvent] = asyncio.Queue(maxsize=settings.queue_max_size)
     metrics = Metrics()
     redis = Redis.from_url(
         settings.redis_url,
@@ -59,17 +58,7 @@ async def run_service(settings: Settings) -> None:
 
     tasks = {
         "mqtt": asyncio.create_task(mqtt.run(stop_event)),
-        "writer": asyncio.create_task(writer.run(stop_event)),
-        "retention": asyncio.create_task(
-            run_retention(
-                redis,
-                settings.redis_stream,
-                settings.retention_days * 24 * 60 * 60,
-                settings.retention_interval_seconds,
-                stop_event,
-                logger,
-            )
-        ),
+        "writer": asyncio.create_task(writer.run(writer_stop)),
         "metrics": asyncio.create_task(
             report_metrics(
                 metrics,
@@ -80,6 +69,27 @@ async def run_service(settings: Settings) -> None:
             )
         ),
     }
+    if settings.retention_enabled:
+        log_event(
+            logger,
+            "safe_retention_enabled",
+            required_groups=settings.retention_required_groups,
+        )
+        tasks["retention"] = asyncio.create_task(
+            run_retention(
+                redis,
+                settings.redis_stream,
+                settings.retention_days * 24 * 60 * 60,
+                settings.retention_interval_seconds,
+                stop_event,
+                logger,
+                required_groups=settings.retention_required_groups,
+                trim_limit=settings.retention_trim_limit,
+                max_groups=settings.retention_max_groups,
+            )
+        )
+    else:
+        log_event(logger, "retention_disabled")
     stop_waiter = asyncio.create_task(stop_event.wait())
     failure: BaseException | None = None
 
@@ -111,16 +121,20 @@ async def run_service(settings: Settings) -> None:
                         exc_info=True,
                     )
                 else:
-                    failure = RuntimeError(f"task {name} exited unexpectedly")
+                    if not stop_event.is_set():
+                        failure = RuntimeError(f"task {name} exited unexpectedly")
                 break
         stop_event.set()
+        shutdown_deadline = (
+            asyncio.get_running_loop().time() + settings.shutdown_timeout_seconds
+        )
 
         # Stop ingress before checking queue.join(), otherwise the MQTT task
         # could enqueue one final message just after the queue looked empty.
         try:
             await asyncio.wait_for(
                 asyncio.shield(tasks["mqtt"]),
-                timeout=min(5.0, settings.shutdown_timeout_seconds),
+                timeout=settings.shutdown_timeout_seconds + 1,
             )
         except TimeoutError:
             tasks["mqtt"].cancel()
@@ -129,9 +143,13 @@ async def run_service(settings: Settings) -> None:
             if failure is None:
                 failure = exc
 
+        writer_stop.set()
         try:
             await asyncio.wait_for(
-                queue.join(), timeout=settings.shutdown_timeout_seconds
+                queue.join(),
+                timeout=max(
+                    0.001, shutdown_deadline - asyncio.get_running_loop().time()
+                ),
             )
         except TimeoutError:
             log_event(
@@ -158,66 +176,3 @@ async def run_service(settings: Settings) -> None:
 
     if failure:
         raise failure
-
-
-async def run_persister(settings: Settings) -> None:
-    """Lê o Redis Stream e grava as leituras no PostgreSQL."""
-    import asyncpg
-
-    from station_ingest.persistence import PgReadingStore, StreamPersister
-
-    if not settings.database_url:
-        raise RuntimeError("INGEST_DATABASE_URL é obrigatório para o persist")
-
-    logger = logging.getLogger("station_ingest.persist")
-    stop_event = asyncio.Event()
-    install_signal_handlers(stop_event)
-
-    redis = Redis.from_url(
-        settings.redis_url,
-        socket_timeout=settings.redis_socket_timeout_seconds
-        + settings.persist_block_ms / 1000,
-        socket_connect_timeout=settings.redis_socket_timeout_seconds,
-        health_check_interval=30,
-        decode_responses=True,
-    )
-    pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=4)
-    persister = StreamPersister(
-        redis,
-        PgReadingStore(pool),
-        stream=settings.redis_stream,
-        group=settings.persist_group,
-        consumer=settings.persist_consumer,
-        batch_size=settings.persist_batch_size,
-        block_ms=settings.persist_block_ms,
-        retry_initial_seconds=settings.retry_initial_seconds,
-        retry_max_seconds=settings.retry_max_seconds,
-        logger=logger,
-    )
-    log_event(
-        logger,
-        "persister_started",
-        redis_stream=settings.redis_stream,
-        group=settings.persist_group,
-        consumer=settings.persist_consumer,
-    )
-    task = asyncio.create_task(persister.run(stop_event))
-    stop_waiter = asyncio.create_task(stop_event.wait())
-    try:
-        done, _ = await asyncio.wait(
-            {task, stop_waiter}, return_when=asyncio.FIRST_COMPLETED
-        )
-        if task in done:
-            task.result()
-    finally:
-        stop_event.set()
-        task.cancel()
-        stop_waiter.cancel()
-        await asyncio.gather(task, stop_waiter, return_exceptions=True)
-        await pool.close()
-        await redis.aclose()
-        log_event(
-            logger,
-            "persister_stopped",
-            readings_written=persister.readings_written,
-        )

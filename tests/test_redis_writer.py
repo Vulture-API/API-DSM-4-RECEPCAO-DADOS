@@ -36,14 +36,9 @@ class FakeRedis:
         assert transaction is False
         return FakePipeline(self)
 
-    async def time(self) -> tuple[int, int]:
-        return (1_700_000_000, 500_000)
-
-    async def xtrim(
-        self, name: str, *, minid: str, approximate: bool
-    ) -> int:
-        self.trim_call = (name, minid, approximate)
-        return 3
+    async def eval(self, script, count, stream, age, groups, limit, max_groups):
+        self.trim_call = (stream, age, groups, limit, max_groups)
+        return [3, "1699999940500-0", "age", ""]
 
 
 def buffered(station_id: str) -> BufferedEvent:
@@ -128,10 +123,146 @@ async def test_bounded_queue_applies_backpressure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_retention_uses_redis_clock() -> None:
+async def test_retention_delegates_to_atomic_safe_policy() -> None:
     redis = FakeRedis()
 
     removed = await enforce_retention_once(redis, "stream", 60)
 
     assert removed == 3
-    assert redis.trim_call == ("stream", "1699999940500-0", True)
+    assert redis.trim_call == ("stream", 60, '["postgres-persister"]', 10000, 128)
+
+
+@pytest.mark.asyncio
+async def test_ack_follows_successful_xadd_and_retry():
+    from dataclasses import replace
+
+    redis = FakeRedis(failures=1)
+    queue = asyncio.Queue()
+    attempts_at_ack = []
+    event = replace(
+        buffered("a"),
+        confirm=lambda: attempts_at_ack.append(redis.execute_attempts) or True,
+    )
+    queue.put_nowait(event)
+    metrics = Metrics()
+    writer = RedisStreamWriter(
+        redis,
+        "stream",
+        queue,
+        metrics,
+        batch_size=1,
+        flush_interval_seconds=0.001,
+        retry_initial_seconds=0.001,
+        retry_max_seconds=0.002,
+        logger=__import__("logging").getLogger("test"),
+    )
+    stop = asyncio.Event()
+    stop.set()
+    await writer.run(stop)
+    assert attempts_at_ack == [2]
+    assert metrics.mqtt_acked == 1
+    assert metrics.latency_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_write_does_not_ack():
+    from dataclasses import replace
+
+    redis = FakeRedis(failures=1000)
+    queue = asyncio.Queue()
+    acks = []
+    queue.put_nowait(replace(buffered("a"), confirm=lambda: acks.append(True) or True))
+    writer = RedisStreamWriter(
+        redis,
+        "stream",
+        queue,
+        Metrics(),
+        batch_size=1,
+        flush_interval_seconds=0.001,
+        retry_initial_seconds=10,
+        retry_max_seconds=10,
+        logger=__import__("logging").getLogger("test"),
+    )
+    task = asyncio.create_task(writer.run(asyncio.Event()))
+    async with asyncio.timeout(1):
+        while redis.execute_attempts == 0:
+            await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert acks == []
+
+
+@pytest.mark.asyncio
+async def test_incomplete_pipeline_result_is_retried_before_ack():
+    from dataclasses import replace
+    from unittest.mock import AsyncMock, Mock
+
+    redis, pipeline = Mock(), Mock()
+    redis.pipeline.return_value = pipeline
+    # The first call may have written a prefix of the batch. Retrying can
+    # duplicate entries, but none of the MQTT receipts may be confirmed yet.
+    pipeline.execute = AsyncMock(side_effect=[["1-0"], ["2-0", "3-0"]])
+    queue, stop, metrics, acks = asyncio.Queue(), asyncio.Event(), Metrics(), []
+    for station in ("a", "b"):
+        queue.put_nowait(
+            replace(
+                buffered(station),
+                confirm=lambda: acks.append(pipeline.execute.await_count) or True,
+            )
+        )
+    writer = RedisStreamWriter(
+        redis,
+        "stream",
+        queue,
+        metrics,
+        batch_size=2,
+        flush_interval_seconds=0.001,
+        retry_initial_seconds=0.001,
+        retry_max_seconds=0.002,
+        logger=__import__("logging").getLogger("test"),
+    )
+    stop.set()
+    await writer.run(stop)
+    assert acks == [2, 2]
+    assert metrics.redis_retries == 1
+    assert metrics.persisted == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_pipeline_does_not_log_command_payload(caplog):
+    import logging
+    from unittest.mock import AsyncMock, Mock
+
+    from redis.exceptions import ResponseError
+
+    redis, pipeline = Mock(), Mock()
+    redis.pipeline.return_value = pipeline
+    pipeline.execute = AsyncMock(
+        side_effect=[
+            ResponseError(
+                "Command # 1 XADD payload PRIVATE_MEASUREMENT caused an error"
+            ),
+            ["1-0"],
+        ]
+    )
+    queue, stop = asyncio.Queue(), asyncio.Event()
+    queue.put_nowait(buffered("station"))
+    stop.set()
+    writer = RedisStreamWriter(
+        redis,
+        "stream",
+        queue,
+        Metrics(),
+        batch_size=1,
+        flush_interval_seconds=0.001,
+        retry_initial_seconds=0.001,
+        retry_max_seconds=0.002,
+        logger=logging.getLogger("test"),
+    )
+    with caplog.at_level(logging.ERROR):
+        await writer.run(stop)
+    from station_ingest.logging_config import JsonFormatter
+
+    rendered = "\n".join(JsonFormatter().format(record) for record in caplog.records)
+    assert "PRIVATE_MEASUREMENT" not in rendered
+    assert "ResponseError" in rendered

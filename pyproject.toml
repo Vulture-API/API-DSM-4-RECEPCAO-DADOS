@@ -9,8 +9,7 @@ description = "High-throughput MQTT to Redis Streams ingestion service"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "aiomqtt>=2.5,<3",
-    "asyncpg>=0.30,<1",
+    "paho-mqtt>=2.1,<3",
     "pydantic>=2.10,<3",
     "pydantic-settings>=2.7,<3",
     "redis[hiredis]>=5.2,<7",
@@ -20,7 +19,10 @@ dependencies = [
 test = [
     "pytest>=8.3,<9",
     "pytest-asyncio>=0.25,<2",
+    "pytest-cov>=6,<8",
+    "aiomqtt>=2.5,<3",
 ]
+lint = ["ruff==0.16.10"]
 
 [project.scripts]
 station-ingest = "station_ingest.__main__:main"
@@ -35,4 +37,22 @@ testpaths = ["tests"]
 markers = [
     "integration: requires externally provided MQTT and Redis services",
 ]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+# Linhas longas ficam a cargo do formatter (SQL e mensagens não são quebrados).
+ignore = ["E501"]
+
+[tool.coverage.run]
+source = ["station_ingest"]
+branch = false
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = true
 
