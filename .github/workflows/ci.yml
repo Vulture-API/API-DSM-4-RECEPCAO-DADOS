@@ -163,7 +163,13 @@ jobs:
       - name: Checagem de formatação
         run: ruff format --check .
 
-      - name: Testes com cobertura
+      - name: Testes unitários
+        run: pytest -rs -m "not integration"
+
+      - name: Testes de integração (Mosquitto e Redis)
+        run: pytest -rs -m "integration"
+
+      - name: Cobertura total de testes
         run: |
           pytest -rs --cov --cov-report=term --cov-report=json \
             --cov-report=xml --junitxml=reports/junit.xml
