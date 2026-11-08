@@ -1,18 +1,17 @@
 # SCRUM-377 — Análise estática de qualidade e segurança (CodeQL).
-# Roda em PR, na dev/main e toda segunda; os alertas ficam na aba Security.
+# Roda no PR para a dev e toda segunda na dev (os alertas ficam na aba Security).
+# Não repete no push da dev nem na main: o conteúdo é o mesmo analisado no PR.
 name: CodeQL
 
 on:
   pull_request:
-    branches: [dev, main]
-  push:
-    branches: [dev, main]
+    branches: [dev]
   schedule:
     - cron: "0 9 * * 1"
   workflow_dispatch:
 
 concurrency:
-  group: codeql-${{ github.ref }}
+  group: codeql-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 permissions:
