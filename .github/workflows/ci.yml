@@ -34,7 +34,7 @@ jobs:
   procedencia:
     name: Procedência do commit na dev
     if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -45,7 +45,7 @@ jobs:
     steps:
       - name: Conferir se o conteúdo já foi testado no PR
         id: conferir
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const sha = context.sha;
@@ -99,7 +99,7 @@ jobs:
     # provar que este conteúdo já passou no PR.
     if: ${{ !cancelled() && needs.procedencia.outputs.testado != 'true' }}
     name: Lint, testes e build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
       coverage: ${{ steps.coverage_gate.outputs.coverage }}
@@ -123,12 +123,12 @@ jobs:
 
     steps:
       - name: Checkout do repositório
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
       - name: Configurar Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -227,7 +227,7 @@ jobs:
 
       - name: Publicar relatórios
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ci-reports
           path: |
@@ -244,14 +244,14 @@ jobs:
 
   docker:
     name: Validar build da imagem Docker
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: quality
     if: ${{ !cancelled() && needs.quality.result == 'success' }}
     timeout-minutes: 15
 
     steps:
       - name: Checkout do repositório
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -269,7 +269,7 @@ jobs:
 
   comment:
     name: Comentar resultado no PR
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [quality, docker]
     if: >-
       !cancelled() && github.event_name == 'pull_request' &&
@@ -280,7 +280,7 @@ jobs:
     steps:
       - name: Criar ou atualizar o comentário do CI
         continue-on-error: true
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           QUALITY: ${{ needs.quality.result }}
           DOCKER: ${{ needs.docker.result }}
