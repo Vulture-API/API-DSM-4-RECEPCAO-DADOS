@@ -45,7 +45,7 @@ jobs:
     steps:
       - name: Conferir se o conteúdo já foi testado no PR
         id: conferir
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const sha = context.sha;
@@ -123,12 +123,12 @@ jobs:
 
     steps:
       - name: Checkout do repositório
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       - name: Configurar Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -234,7 +234,7 @@ jobs:
 
       - name: Publicar relatórios
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ci-reports
           path: |
@@ -258,7 +258,7 @@ jobs:
 
     steps:
       - name: Checkout do repositório
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -287,7 +287,7 @@ jobs:
     steps:
       - name: Criar ou atualizar o comentário do CI
         continue-on-error: true
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           QUALITY: ${{ needs.quality.result }}
           DOCKER: ${{ needs.docker.result }}
