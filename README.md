@@ -170,7 +170,8 @@ Os testes de redelivery e retenção segura são obrigatórios. O CI também ver
 que o pacote e a imagem não incluem `asyncpg` nem o módulo de persistência antigo.
 
 O workflow `.github/workflows/codeql.yml` preserva a análise Python de qualidade
-e segurança adicionada na SCRUM-377, em PRs, dev/main e na agenda configurada.
+e segurança adicionada na SCRUM-377, nos PRs para a dev e toda segunda na dev.
+A main recebe o mesmo código já analisado no PR.
 
 ## Medição de taxa
 
