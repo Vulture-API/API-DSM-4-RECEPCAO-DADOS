@@ -142,7 +142,7 @@ jobs:
             --health-cmd "mosquitto_pub -h localhost -t ci/health -m ok" \
             --health-interval 2s --health-timeout 5s --health-retries 15 \
             eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             [ "$(docker inspect -f '{{.State.Health.Status}}' mosquitto)" = healthy ] && exit 0
             sleep 2
           done
@@ -163,16 +163,23 @@ jobs:
       - name: Checagem de formatação
         run: ruff format --check .
 
+      # Cada nível roda uma vez e acumula a cobertura; o passo de cobertura só
+      # junta os dados e gera os relatórios, sem rodar os testes de novo.
       - name: Testes unitários
-        run: pytest -rs -m "not integration"
+        run: |
+          pytest -rs -m "not integration" --cov --cov-report= --cov-fail-under=0 \
+            --junitxml=reports/junit-unit.xml
 
       - name: Testes de integração (Mosquitto e Redis)
-        run: pytest -rs -m "integration"
+        run: |
+          pytest -rs -m "integration" --cov --cov-append --cov-report= --cov-fail-under=0 \
+            --junitxml=reports/junit-integration.xml
 
       - name: Cobertura total de testes
         run: |
-          pytest -rs --cov --cov-report=term --cov-report=json \
-            --cov-report=xml --junitxml=reports/junit.xml
+          coverage report --fail-under=0
+          coverage json
+          coverage xml
 
       # Os testes de integração viram "skipped" se faltar um serviço ou uma
       # variável; no CI isso tem que falhar, não passar em silêncio.
@@ -182,13 +189,13 @@ jobs:
           import sys
           import xml.etree.ElementTree as ET
 
-          root = ET.parse("reports/junit.xml").getroot()
-          suites = [root] if root.tag == "testsuite" else list(root)
+          roots = [ET.parse(f"reports/junit-{n}.xml").getroot() for n in ("unit", "integration")]
+          suites = [s for r in roots for s in ([r] if r.tag == "testsuite" else list(r))]
           skipped = sum(int(s.get("skipped", 0)) for s in suites)
           if skipped:
               print(f"::error::{skipped} teste(s) pulado(s). Confira os serviços e as variáveis TEST_* do job.")
               sys.exit(1)
-          cases = list(root.iter("testcase"))
+          cases = [c for r in roots for c in r.iter("testcase")]
           assert cases, "No tests were reported"
           for name in ["test_main_rejects_removed_persist_before_configuration", "test_ack_follows_successful_xadd_and_retry", "test_real_retention_never_removes_pending_or_undelivered"]:
               assert any(name in c.attrib["name"] for c in cases), f"Missing {name}"
